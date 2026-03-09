@@ -940,19 +940,39 @@ if st.session_state.wizard_step == "identify":
         unsafe_allow_html=True,
     )
 
-    # ── Camera ────────────────────────────────────────────────────────────────
-    cam_key   = f"cam_{st.session_state.camera_counter}"
-    cam_photo = st.camera_input("📷 Take a photo of the part", key=cam_key)
+    # ── Photo input — camera OR upload ────────────────────────────────────────
+    tab_cam, tab_upload = st.tabs(["📷 Take Photo", "🖼️ Upload Photo"])
 
-    if cam_photo is not None:
-        _bytes = cam_photo.getvalue()
-        _hash  = hashlib.md5(_bytes).hexdigest()
-        if _hash != st.session_state.last_cam_hash:
-            st.session_state.image_bytes      = _bytes
-            st.session_state.image_name       = f"photo_{st.session_state.camera_counter}.jpg"
-            st.session_state.image_media_type = "image/jpeg"
-            st.session_state.last_cam_hash    = _hash
-            st.session_state.camera_counter  += 1
+    with tab_cam:
+        cam_key   = f"cam_{st.session_state.camera_counter}"
+        cam_photo = st.camera_input("Take a photo of the part", key=cam_key,
+                                    label_visibility="collapsed")
+        if cam_photo is not None:
+            _bytes = cam_photo.getvalue()
+            _hash  = hashlib.md5(_bytes).hexdigest()
+            if _hash != st.session_state.last_cam_hash:
+                st.session_state.image_bytes      = _bytes
+                st.session_state.image_name       = f"photo_{st.session_state.camera_counter}.jpg"
+                st.session_state.image_media_type = "image/jpeg"
+                st.session_state.last_cam_hash    = _hash
+                st.session_state.camera_counter  += 1
+
+    with tab_upload:
+        uploaded_file = st.file_uploader(
+            "Choose a photo from your device",
+            type=["jpg", "jpeg", "png", "webp", "heic"],
+            key="photo_uploader",
+            label_visibility="collapsed",
+        )
+        if uploaded_file is not None:
+            _bytes = uploaded_file.read()
+            _hash  = hashlib.md5(_bytes).hexdigest()
+            if _hash != st.session_state.last_cam_hash:
+                _mime = uploaded_file.type or "image/jpeg"
+                st.session_state.image_bytes      = _bytes
+                st.session_state.image_name       = uploaded_file.name
+                st.session_state.image_media_type = _mime
+                st.session_state.last_cam_hash    = _hash
 
     # Show thumbnail if we have an image
     if st.session_state.image_bytes:
