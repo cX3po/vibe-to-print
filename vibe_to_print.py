@@ -619,6 +619,8 @@ _DEFAULTS: dict = {
     "api_key":            "",          # HF / Claude / OpenAI token
     "ai_provider":        "none",      # none | hf | claude | openai | ollama
     "show_refinement":    False,       # toggle refinement panel in results step
+    "show_buy_links":     False,       # toggle buy-links panel in results step
+    "market_result":      None,        # dict from _market_search()
 }
 
 for _k, _v in _DEFAULTS.items():
@@ -986,7 +988,7 @@ if st.session_state.wizard_step == "identify":
                  disabled=not has_input,
                  use_container_width=True):
 
-        with st.spinner("Reading photo…"):
+        with st.spinner("Reading photo & identifying part…"):
             _result = analyze_input(
                 image_bytes  = st.session_state.image_bytes,
                 description  = description,
@@ -994,9 +996,16 @@ if st.session_state.wizard_step == "identify":
                 ai_provider  = st.session_state.ai_provider,
             )
 
-        st.session_state.identify_result  = _result
+        with st.spinner("🔎 Searching market prices…"):
+            _mq = _result.get("template_name") or description or "replacement part"
+            st.session_state.market_result = _market_search(
+                _mq, _result.get("object_type", "")
+            )
+
+        st.session_state.identify_result   = _result
         st.session_state.selected_template = tmpl_get(_result["template_id"])
         st.session_state.dim_values        = _result["suggested_dims"]
+        st.session_state.show_buy_links    = False
         _go("results")
 
     # ── Optional AI settings (collapsed) ─────────────────────────────────────
@@ -1440,6 +1449,127 @@ def _caliper_tips_html(template_id: str) -> str:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# MARKET RESEARCH  — Buy vs. Print price comparison
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Estimated filament use and cost at ~$20/kg PLA (≈ $0.02/g)
+_PRINT_COST: dict[str, tuple[str, str]] = {
+    "Knobs & Controls":     ("12–18 g",  "$0.24–$0.36"),
+    "Enclosures & Boxes":   ("40–80 g",  "$0.80–$1.60"),
+    "Caps & Plugs":         ("4–8 g",    "$0.08–$0.16"),
+    "Brackets & Mounts":    ("15–25 g",  "$0.30–$0.50"),
+    "Cable Management":     ("6–10 g",   "$0.12–$0.20"),
+    "Hooks & Hangers":      ("12–20 g",  "$0.24–$0.40"),
+    "Fasteners & Hardware": ("2–5 g",    "$0.04–$0.10"),
+    "Furniture & Handles":  ("20–35 g",  "$0.40–$0.70"),
+}
+_PRINT_COST_DEFAULT = ("10–20 g", "< $0.50")
+
+_PRICE_RE = re.compile(
+    r'(?:[$£€])\s*\d{1,4}(?:\.\d{2})?'
+    r'|\d{1,4}(?:\.\d{2})?\s*(?:USD|GBP|EUR|dollars?)',
+    re.IGNORECASE,
+)
+
+
+def _market_search(part_name: str, category: str = "") -> dict:
+    """
+    Query DuckDuckGo Instant Answers for retail pricing on a part.
+
+    Returns:
+        abstract     : str        — DDG text (may be empty)
+        prices       : list[str]  — price strings found in abstract
+        buy_links    : list[dict] — [{site, url}, ...]
+        print_weight : str
+        print_cost   : str
+        error        : str        — non-fatal; empty on success
+    """
+    result: dict = {
+        "abstract":     "",
+        "prices":       [],
+        "buy_links":    [],
+        "print_weight": _PRINT_COST_DEFAULT[0],
+        "print_cost":   _PRINT_COST_DEFAULT[1],
+        "error":        "",
+    }
+
+    if category in _PRINT_COST:
+        result["print_weight"], result["print_cost"] = _PRINT_COST[category]
+
+    # ── DuckDuckGo Instant Answers ─────────────────────────────────────────
+    try:
+        r = requests.get(
+            "https://api.duckduckgo.com/",
+            params={
+                "q":             f"{part_name} replacement part buy price",
+                "format":        "json",
+                "no_html":       "1",
+                "skip_disambig": "1",
+            },
+            timeout=8,
+        )
+        r.raise_for_status()
+        ddg = r.json()
+        blob = (ddg.get("Abstract") or ddg.get("Answer") or "").strip()
+        # Also sweep related topic snippets for price mentions
+        for topic in ddg.get("RelatedTopics", [])[:6]:
+            if isinstance(topic, dict) and topic.get("Text"):
+                blob += " " + topic["Text"]
+        result["abstract"] = blob[:600]          # cap for display
+        found = _PRICE_RE.findall(blob)
+        result["prices"] = list(dict.fromkeys(found))[:4]   # deduplicate
+    except requests.Timeout:
+        result["error"] = "Price search timed out — showing search links only."
+    except Exception as exc:
+        result["error"] = f"Search unavailable ({exc}) — showing search links."
+
+    # ── Pre-formed shopping search URLs (no API key required) ─────────────
+    q = urllib.parse.quote_plus(part_name)
+    result["buy_links"] = [
+        {"site": "Amazon",
+         "url":  f"https://www.amazon.com/s?k={q}"},
+        {"site": "eBay",
+         "url":  f"https://www.ebay.com/sch/i.html?_nkw={q}"},
+        {"site": "RepairClinic",
+         "url":  f"https://www.repairclinic.com/Search?q={q}"},
+        {"site": "ApplianceParts",
+         "url":  f"https://www.appliancepartspros.com/search?q={q}"},
+    ]
+    return result
+
+
+# ── Vibe decision message ─────────────────────────────────────────────────────
+
+def _vibe_message(prices: list[str], print_cost: str) -> str:
+    """Return the context-aware 'should I print?' nudge."""
+    if not prices:
+        return (
+            f"Original parts can cost $10–$50+ and take days to ship. "
+            f"Print a custom version right now for {print_cost} in filament."
+        )
+    raw = prices[0]
+    digits = re.sub(r"[^0-9.]", "", raw.split()[0])
+    try:
+        val = float(digits)
+    except ValueError:
+        return f"Print a custom fit for just {print_cost} instead of waiting for a delivery."
+    if val < 5:
+        return (
+            f"The original part is only **{raw}** — printing may save time more than money, "
+            f"but you'll get a perfect custom fit either way."
+        )
+    if val < 25:
+        return (
+            f"The original part runs **{raw}** and likely takes days to ship. "
+            f"Print a custom version right now for {print_cost} in filament."
+        )
+    return (
+        f"At **{raw}** for the original (plus shipping), printing your own saves serious cash "
+        f"— and you get an exact fit, not a generic replacement."
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # STEP 2 — VALIDATE & REFINE  (wizard_step == "results")
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -1477,6 +1607,83 @@ if st.session_state.wizard_step == "results":
         )
 
     st.markdown("---")
+
+    # ── Buy vs. Print comparison ──────────────────────────────────────────────
+    mr = st.session_state.get("market_result")
+    if mr:
+        part_label      = res.get("template_name") or tmpl["name"]
+        price_display   = mr["prices"][0] if mr["prices"] else "Search online"
+        pw              = mr["print_weight"]
+        pc              = mr["print_cost"]
+        vibe_msg        = _vibe_message(mr["prices"], pc)
+        links_html      = " &nbsp;·&nbsp; ".join(
+            f'<a href="{lk["url"]}" target="_blank" '
+            f'style="color:#1565c0;font-size:11px">{lk["site"]}</a>'
+            for lk in mr["buy_links"]
+        )
+
+        st.markdown(
+            f"""
+<div style="background:linear-gradient(135deg,#fffde7,#fff8e1);
+     border:2px solid #f9a825;border-radius:14px;padding:16px;margin:4px 0 12px 0">
+  <div style="font-size:15px;font-weight:800;margin-bottom:10px">
+    🛒 Buy vs. 🖨️ Print
+  </div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px">
+    <div style="background:#fff;border-radius:10px;padding:12px;
+                border:1px solid #f9a825;text-align:center">
+      <div style="font-size:10px;color:#999;letter-spacing:1px">🛒 ORIGINAL PART</div>
+      <div style="font-weight:700;font-size:13px;margin:4px 0">{part_label}</div>
+      <div style="font-size:22px;font-weight:900;color:#c62828">{price_display}</div>
+      <div style="font-size:10px;color:#888;margin-top:2px">+ shipping &amp; wait time</div>
+      <div style="margin-top:8px">{links_html}</div>
+    </div>
+    <div style="background:#e8f5e9;border-radius:10px;padding:12px;
+                border:1px solid #66bb6a;text-align:center">
+      <div style="font-size:10px;color:#388e3c;letter-spacing:1px">🖨️ PRINT IT NOW</div>
+      <div style="font-weight:700;font-size:13px;margin:4px 0">Custom 3D Print</div>
+      <div style="font-size:22px;font-weight:900;color:#2e7d32">{pc}</div>
+      <div style="font-size:10px;color:#555;margin-top:2px">{pw} filament · ~1 hr print</div>
+    </div>
+  </div>
+  <div style="background:#fffde7;border-radius:8px;padding:10px;
+              font-size:13px;color:#4e342e;border:1px solid #ffe082">
+    💡 <strong>The Vibe:</strong> {vibe_msg}
+  </div>
+</div>""",
+            unsafe_allow_html=True,
+        )
+
+        # Decision row
+        d_print, d_buy = st.columns(2)
+        with d_print:
+            if st.button("🖨️ Print it — let's go!",
+                         use_container_width=True, type="primary"):
+                st.session_state.selected_template = tmpl
+                st.session_state.show_buy_links    = False
+                _go("dimensions")
+        with d_buy:
+            if st.button("🛒 I'll buy the original",
+                         use_container_width=True):
+                st.session_state.show_buy_links = True
+                st.rerun()
+
+        if st.session_state.get("show_buy_links"):
+            st.markdown("#### 🛒 Where to buy")
+            for lk in mr["buy_links"]:
+                st.markdown(f"- [{lk['site']}]({lk['url']})")
+            if mr.get("abstract"):
+                with st.expander("ℹ️ What we found online"):
+                    st.write(mr["abstract"])
+            st.markdown(
+                "Changed your mind? Use the **🖨️ Print it** button above "
+                "or scroll down to continue with the template."
+            )
+
+        st.markdown("---")
+
+        if mr.get("error"):
+            st.caption(f"ℹ️ {mr['error']}")
 
     # ── Initialise dim_values from template defaults + AI suggestions ─────────
     if not st.session_state.dim_values:
