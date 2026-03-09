@@ -6,6 +6,7 @@ A mobile-first Streamlit app for photo → OpenSCAD → G-code → Printer.
 import base64
 import hashlib
 import tempfile
+import urllib.parse
 from pathlib import Path
 
 import streamlit as st
@@ -23,6 +24,7 @@ import slicer           as sl
 import template_library as tl
 import transfer         as tr
 import viewer3d         as v3d
+import hf_identify      as hfi
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Page config & mobile-first CSS
@@ -223,6 +225,11 @@ _DEFAULTS = {
     "ai_provider":          "Manual (No AI — Template Mode)",
     # Dims fingerprint — detects if measurements changed after SCAD was generated
     "scad_dims_fp":         "",
+    # BLIP identify results (persisted across reruns)
+    "_blip_caption":        "",
+    "_blip_warn":           "",
+    "_blip_query":          "",
+    "_blip_no_match":       False,
 }
 
 for k, v in _DEFAULTS.items():
@@ -749,77 +756,156 @@ if phase == "vision":
     key_ok    = bool(st.session_state.get("api_key")) or _needs_no_key()
 
     if _is_manual():
-        # ── NO-AI PATH: smart keyword search → template suggestion ────────────
-        if not key_ok:
-            st.info(
-                "No API key needed — tap **Identify & Suggest** and we'll find the "
-                "closest template from your description.",
-                icon="💡",
-            )
+        # ══════════════════════════════════════════════════════════════════════
+        # TIER 1 — Free photo identification (BLIP via HF, no account needed)
+        # ══════════════════════════════════════════════════════════════════════
+        st.markdown(
+            '<div style="font-size:13px;color:#7a9ab8;margin-bottom:6px">'
+            '📷 Photo + description → instant part identification, no account needed'
+            '</div>',
+            unsafe_allow_html=True,
+        )
 
         if st.button("🔍 Identify & Suggest Measurements",
                      type="primary",
-                     disabled=not vibe.strip(),
+                     disabled=not (has_image or vibe.strip()),
                      use_container_width=True):
-            # Try AI first if a non-manual provider + key happens to be configured
-            _provider = st.session_state.get("ai_provider", ab.PROVIDER_MANUAL)
-            _has_key  = bool(st.session_state.get("api_key")) or _provider in (
-                ab.PROVIDER_OLLAMA, ab.PROVIDER_HF
-            )
-            _use_ai   = (_provider != ab.PROVIDER_MANUAL) and _has_key
 
-            if _use_ai:
-                img_b64  = (base64.standard_b64encode(st.session_state.image_bytes).decode()
-                            if has_image else None)
-                ref_hint = si.hint_text(st.session_state.get("ref_obj_key", "auto"))
-                with st.spinner("AI is identifying the object…"):
+            _caption = ""
+            _warn    = ""
+
+            # Step 1 — BLIP image caption (free, anonymous HF)
+            if has_image:
+                with st.spinner("Analyzing photo with free AI…"):
                     try:
-                        brain = _get_brain()
-                        summary, dims, scale_meta = brain.extract_dimensions(
-                            img_b64, st.session_state.image_media_type, vibe,
-                            active_p["name"], material, reference_hint=ref_hint,
+                        _caption = hfi.caption_image(
+                            st.session_state.image_bytes,
+                            hf_token=st.session_state.get("api_key", ""),
                         )
-                    except Exception as exc:
-                        st.error(f"AI error: {exc}")
-                        st.stop()
-                if not dims:
-                    st.error("AI returned no dimensions. Try rephrasing.")
-                    st.stop()
-                st.session_state.object_summary = summary
-                st.session_state.required_dims  = dims
-                st.session_state.scale_meta     = scale_meta
+                    except RuntimeError as _e:
+                        _warn = str(_e)
+
+            # Step 2 — search templates using caption + description
+            _query      = f"{_caption} {vibe}".strip()
+            _kw_matches = tl.search(_query, "") if _query else []
+
+            # Store caption so we can show it even after rerun
+            st.session_state["_blip_caption"] = _caption
+            st.session_state["_blip_warn"]    = _warn
+            st.session_state["_blip_query"]   = _query
+
+            if _kw_matches:
+                _best = _kw_matches[0]
+                _t    = tl.get(_best["id"])
+                st.session_state.selected_template_id = _best["id"]
+                st.session_state.required_dims = [
+                    {
+                        "id":       d["id"],
+                        "question": d["question"],
+                        "prefill":  str(d["default"]),
+                    }
+                    for d in _t["dims"]
+                ]
+                st.session_state.vibe_description = vibe
+                _src = f"Photo AI + description" if _caption else "Description"
+                st.session_state.object_summary = (
+                    f"**{_best['name']}** — {_best['description']}\n\n"
+                    f"*Source: {_src}. Review and adjust measurements below.*"
+                )
+                if _caption:
+                    st.session_state.object_summary = (
+                        f"📷 Photo AI says: *\"{_caption}\"*\n\n"
+                        + st.session_state.object_summary
+                    )
                 reset_to("dimensions")
                 st.rerun()
             else:
-                # Keyword match against template library
-                _kw_matches = tl.search(vibe, "")
-                if not _kw_matches:
-                    st.warning(
-                        "No matching template found. Try different keywords or "
-                        "browse templates below.",
-                        icon="🔎",
-                    )
-                else:
-                    _best = _kw_matches[0]
-                    _t    = tl.get(_best["id"])
-                    st.session_state.selected_template_id = _best["id"]
-                    st.session_state.required_dims = [
-                        {
-                            "id":       d["id"],
-                            "question": d["question"],
-                            "prefill":  str(d["default"]),
-                        }
-                        for d in _t["dims"]
-                    ]
-                    st.session_state.vibe_description = vibe
-                    st.session_state.object_summary   = (
-                        f"Suggested match: **{_best['name']}** — {_best['description']}\n\n"
-                        f"Review and adjust the measurements below."
-                    )
-                    reset_to("dimensions")
-                    st.rerun()
+                # No match — stay on page, show fallback options below
+                st.session_state["_blip_no_match"] = True
 
-        # ── Browse templates manually (secondary, tucked away) ────────────────
+        # Show any caption / warning from the last identify attempt
+        if st.session_state.get("_blip_caption"):
+            st.info(f"📷 Photo AI sees: *\"{st.session_state['_blip_caption']}\"*")
+        if st.session_state.get("_blip_warn"):
+            st.warning(st.session_state["_blip_warn"])
+        if st.session_state.get("_blip_no_match"):
+            st.warning(
+                "No matching template found — try the search options below "
+                "or rephrase your description.",
+                icon="🔎",
+            )
+            st.session_state["_blip_no_match"] = False  # reset so it doesn't persist
+
+        st.divider()
+
+        # ══════════════════════════════════════════════════════════════════════
+        # TIER 2 — Web search fallback (Google Lens + text search)
+        # ══════════════════════════════════════════════════════════════════════
+        with st.expander("🌐 Search the web for more info"):
+            _urls = hfi.make_search_urls(
+                vibe,
+                caption=st.session_state.get("_blip_caption", ""),
+            )
+            st.caption(
+                "Download the photo then open Google Lens — or run a web search "
+                "to find dimensions for your part."
+            )
+
+            _col1, _col2 = st.columns(2)
+            with _col1:
+                if has_image:
+                    st.download_button(
+                        "⬇ Download photo",
+                        data=st.session_state.image_bytes,
+                        file_name="identify_me.jpg",
+                        mime="image/jpeg",
+                        use_container_width=True,
+                    )
+                st.link_button(
+                    "🔍 Open Google Lens",
+                    _urls["google_lens"],
+                    use_container_width=True,
+                )
+            with _col2:
+                st.link_button(
+                    "🌐 Google search",
+                    _urls["google"],
+                    use_container_width=True,
+                )
+                st.link_button(
+                    "🔎 Bing search",
+                    _urls["bing"],
+                    use_container_width=True,
+                )
+
+        # ══════════════════════════════════════════════════════════════════════
+        # TIER 3 — Hook up smarter AI (HF token / local AI)
+        # ══════════════════════════════════════════════════════════════════════
+        with st.expander("🤖 Get smarter results — connect an AI"):
+            st.markdown("""
+**Option A — Free Hugging Face account**
+Get a free token at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens)
+→ Paste it in **⚙️ Advanced Settings → AI Brain**
+→ Higher rate limits + better vision models
+
+---
+
+**Option B — Local AI (Ollama) — works offline, completely private**
+1. Install [Ollama](https://ollama.ai) on your computer or home server
+2. Run: `ollama pull llava` (vision model)
+3. Select **Local (Ollama)** in ⚙️ Advanced Settings
+4. Works on any device on the same network — no API key, no data sent to cloud
+
+---
+
+**Option C — Use any AI chatbot you already have**
+If you have ChatGPT, Claude, Gemini, or a phone AI app:
+1. Download your photo (button above)
+2. Ask: *"What is this? What measurements would I need to 3D print a replacement?"*
+3. Paste the answer into the description and tap Identify again
+""")
+
+        # ── Browse templates manually (last resort) ───────────────────────────
         with st.expander("📚 Browse templates manually"):
             search_col, cat_col = st.columns([3, 1], gap="medium")
             with search_col:
