@@ -806,42 +806,198 @@ def _default_dims(template: dict) -> dict[str, str]:
     return {d["id"]: str(d["default"]) for d in template["dims"]}
 
 
+# ── Vision AI (Claude / OpenAI) ───────────────────────────────────────────────
+
+_VISION_SYSTEM_PROMPT = """\
+System Role: You are a mechanical engineering assistant specialized in \
+"Right to Repair" and 3D modeling.
+
+Task: Analyze the uploaded image of a broken or missing part.
+
+Visual Forensic Description: Describe the part's material (e.g., ABS plastic, \
+brushed aluminum), color, texture, and the specific nature of any damage or wear.
+
+Part Identification: Identify exactly what this part is (e.g., "GE Washing Machine \
+Timer Knob, Model X") and its functional category.
+
+Replacement Search Terms: Provide 3-5 specific keyword strings a user should use \
+to find an OEM replacement.
+
+Technical Schematic Data: Provide the critical dimensions required for a 3D-printed \
+replacement. Use millimetres. Match dimension IDs to the selected template_id below.
+
+SVG Diagram Code: Generate a clean, high-contrast SVG technical drawing of the part. \
+Style it as a professional blueprint: dark navy background (#0d1b2a), white/cyan \
+construction lines (#00e5ff), red dimension annotations (#ff1744). \
+Use viewBox="0 0 400 300". No external references, no filters, no clipPath. \
+Label the most important dimensions directly on the drawing.
+
+Available template IDs (choose the closest match):
+  knob_d_shaft, knob_round_shaft, knob_pointer,
+  box_open, box_with_lid, end_cap, l_bracket,
+  cable_clip, wall_hook, spacer, drawer_pull, button_cap
+
+Constraint: Output ONLY a valid JSON object — no markdown, no prose, nothing else.
+JSON structure:
+{
+  "visual_description": "...",
+  "part_name": "...",
+  "part_model": "...",
+  "category": "...",
+  "search_terms": ["...", "...", "..."],
+  "dimensions": {"dim_id": numeric_value},
+  "template_id": "...",
+  "svg_code": "<svg ...>...</svg>",
+  "creation_idea": "one sentence describing what to 3D-print"
+}"""
+
+_TEMPLATE_IDS = {t["id"] for t in INTERNAL_TEMPLATES}
+
+
+def _vision_ai_analyze(
+    image_bytes: bytes,
+    description: str,
+    provider: str,
+    api_key: str,
+) -> dict | None:
+    """
+    Send image to Claude or OpenAI vision model using the engineering system prompt.
+    Returns parsed JSON dict, or a dict with key "_error" on failure.
+    Returns None if provider is unsupported.
+    """
+    img_b64   = base64.b64encode(image_bytes).decode()
+    user_text = (f"User description: {description}" if description
+                 else "Please analyse this part.")
+
+    raw: str | None = None
+
+    if provider == "claude":
+        try:
+            import anthropic
+            client = anthropic.Anthropic(api_key=api_key)
+            resp   = client.messages.create(
+                model      = "claude-opus-4-5",
+                max_tokens = 2048,
+                system     = _VISION_SYSTEM_PROMPT,
+                messages   = [{
+                    "role": "user",
+                    "content": [
+                        {"type": "image",
+                         "source": {"type": "base64",
+                                    "media_type": "image/jpeg",
+                                    "data": img_b64}},
+                        {"type": "text", "text": user_text},
+                    ],
+                }],
+            )
+            raw = resp.content[0].text
+        except Exception as exc:
+            return {"_error": str(exc)}
+
+    elif provider == "openai":
+        try:
+            from openai import OpenAI
+            client = OpenAI(api_key=api_key)
+            resp   = client.chat.completions.create(
+                model      = "gpt-4o",
+                max_tokens = 2048,
+                messages   = [
+                    {"role": "system", "content": _VISION_SYSTEM_PROMPT},
+                    {"role": "user", "content": [
+                        {"type": "image_url",
+                         "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}},
+                        {"type": "text", "text": user_text},
+                    ]},
+                ],
+            )
+            raw = resp.choices[0].message.content
+        except Exception as exc:
+            return {"_error": str(exc)}
+
+    else:
+        return None
+
+    if not raw:
+        return {"_error": "Vision AI returned empty response."}
+
+    # Strip markdown code fences if the model wrapped the JSON
+    raw = raw.strip()
+    raw = re.sub(r"^```[a-z]*\n?", "", raw)
+    raw = re.sub(r"\n?```$", "", raw).strip()
+
+    try:
+        return json.loads(raw)
+    except Exception:
+        m = re.search(r"\{.*\}", raw, re.DOTALL)
+        if m:
+            try:
+                return json.loads(m.group())
+            except Exception:
+                pass
+    return {"_error": "Could not parse AI response as JSON.", "_raw": raw[:400]}
+
+
 # ── Master analysis function ──────────────────────────────────────────────────
 
 def analyze_input(
     image_bytes:  bytes | None,
     description:  str,
     hf_token:     str = "",
-    ai_provider:  str = "none",   # "none" | "hf" | "ollama"
+    ai_provider:  str = "none",
 ) -> dict:
     """
-    Full pipeline: BLIP caption → template match → structured result.
+    Full pipeline: vision AI → BLIP caption → template match → result.
 
-    Returns:
-    {
-        "caption":             str,   # BLIP output
-        "project_description": str,   # human-friendly task summary
-        "template_id":         str,   # matched INTERNAL_TEMPLATES id
-        "template_name":       str,
-        "suggested_dims":      {id: str},
-        "method":              str,   # how we got here
-        "warning":             str,   # non-fatal message for UI
-    }
+    Returns a dict with at minimum:
+      caption, project_description, template_id, template_name,
+      object_type, suggested_dims, method, warning,
+      part_name, part_model, search_terms, ai_svg
     """
     caption = ""
     warning = ""
     method  = "keyword"
 
-    # ── Step 1: BLIP caption ─────────────────────────────────────────────────
+    # ── Path A: Vision AI (Claude / OpenAI) — richest result ─────────────────
+    if ai_provider in ("claude", "openai") and image_bytes and hf_token:
+        vision = _vision_ai_analyze(image_bytes, description, ai_provider, hf_token)
+        if vision and "_error" not in vision:
+            tid  = vision.get("template_id", "")
+            tmpl = tmpl_get(tid) if tid in _TEMPLATE_IDS else None
+            if not tmpl:
+                # Template ID the model chose isn't valid — fall back to keyword
+                matches = tmpl_search(
+                    f"{vision.get('part_name','')} {vision.get('category','')}"
+                )
+                tmpl = matches[0] if matches else INTERNAL_TEMPLATES[0]
+            dims = _default_dims(tmpl)
+            for did, val in (vision.get("dimensions") or {}).items():
+                if did in dims:
+                    dims[did] = str(val)
+            return {
+                "caption":             vision.get("visual_description", ""),
+                "project_description": vision.get("creation_idea", ""),
+                "template_id":         tmpl["id"],
+                "template_name":       tmpl["name"],
+                "object_type":         tmpl["category"],
+                "suggested_dims":      dims,
+                "method":              f"{ai_provider}_vision",
+                "warning":             "",
+                "part_name":           vision.get("part_name", ""),
+                "part_model":          vision.get("part_model", ""),
+                "search_terms":        vision.get("search_terms", []),
+                "ai_svg":              vision.get("svg_code", ""),
+            }
+        elif vision and "_error" in vision:
+            warning = f"Vision AI: {vision['_error']} — falling back to basic analysis."
+
+    # ── Path B: BLIP + HF/Ollama (existing pipeline) ─────────────────────────
     if image_bytes:
-        caption = _blip_caption(image_bytes, hf_token)
+        caption = _blip_caption(image_bytes, hf_token if ai_provider == "hf" else "")
         if not caption:
-            warning = ("Photo AI is warming up or rate-limited — "
-                       "results based on your description.")
+            warning = warning or ("Photo AI is warming up or rate-limited — "
+                                  "results based on your description.")
 
     combined = f"{caption} {description}".strip()
-
-    # ── Step 2: Try AI for structured JSON ───────────────────────────────────
     ai_json: dict | None = None
 
     if combined and ai_provider in ("hf", "ollama"):
@@ -849,8 +1005,6 @@ def analyze_input(
             f"  {t['id']}: {t['name']} — {t['description']}"
             for t in INTERNAL_TEMPLATES
         )
-        dim_hint = ""
-        # We'll fill dims after template is known; AI can suggest values
         prompt = (
             f"You are a 3D printing expert. Analyse this request and respond "
             f"with ONLY a JSON object — no other text.\n\n"
@@ -864,18 +1018,15 @@ def analyze_input(
             f'  "suggested_dims": {{"dim_id": numeric_value, ...}}\n'
             f'}}'
         )
-
+        raw = ""
         if ai_provider == "hf" and hf_token:
             raw = _hf_chat(prompt, hf_token)
         elif ai_provider == "ollama":
             raw = _ollama_chat(prompt)
-        else:
-            raw = ""
 
         if raw:
             try:
                 clean = re.sub(r"```(?:json)?\n?", "", raw).strip().rstrip("`")
-                # Extract first {...} block
                 m = re.search(r"\{.*\}", clean, re.DOTALL)
                 if m:
                     ai_json = json.loads(m.group())
@@ -883,32 +1034,27 @@ def analyze_input(
             except Exception:
                 ai_json = None
 
-    # ── Step 3: Build result ──────────────────────────────────────────────────
+    # ── Path C: Keyword fallback ──────────────────────────────────────────────
     if ai_json:
         tid      = ai_json.get("template_id", "")
         template = tmpl_get(tid)
         if not template:
-            # AI hallucinated an ID — fall back to keyword
             ai_json = None
 
     if not ai_json:
-        # Keyword fallback — always succeeds
         tid  = _keyword_template(caption, description)
         if not tid:
-            # Broaden: search by combined text
             matches = tmpl_search(combined)
             tid     = matches[0]["id"] if matches else INTERNAL_TEMPLATES[0]["id"]
         template = tmpl_get(tid)
         method   = "keyword"
 
-    template = template or INTERNAL_TEMPLATES[0]   # absolute fallback
+    template = template or INTERNAL_TEMPLATES[0]
 
     if ai_json:
         proj_desc = ai_json.get("project_description", "")
-        raw_dims  = ai_json.get("suggested_dims", {})
-        # Merge AI dims with template defaults (template wins on missing keys)
-        dims = _default_dims(template)
-        for did, val in raw_dims.items():
+        dims      = _default_dims(template)
+        for did, val in (ai_json.get("suggested_dims") or {}).items():
             if did in dims:
                 dims[did] = str(val)
     else:
@@ -920,9 +1066,14 @@ def analyze_input(
         "project_description": proj_desc or _keyword_description(caption, description, template),
         "template_id":         template["id"],
         "template_name":       template["name"],
+        "object_type":         template["category"],
         "suggested_dims":      dims,
         "method":              method,
         "warning":             warning,
+        "part_name":           "",
+        "part_model":          "",
+        "search_terms":        [],
+        "ai_svg":              "",
     }
 
 
@@ -1190,20 +1341,46 @@ if st.session_state.wizard_step == "identify":
 
     # ── Optional AI settings (collapsed) ─────────────────────────────────────
     with st.expander("⚙️ AI settings (optional — app works without these)"):
+        _providers = [
+            "none (keyword matching)",
+            "claude (Anthropic — best analysis ✨)",
+            "openai (GPT-4o — vision analysis ✨)",
+            "hf (Hugging Face — free token)",
+            "ollama (local)",
+        ]
+        _pkeys = ["none", "claude", "openai", "hf", "ollama"]
+        _cur   = st.session_state.ai_provider
+        _idx   = _pkeys.index(_cur) if _cur in _pkeys else 0
         _provider = st.selectbox(
             "AI provider",
-            ["none (keyword matching)", "hf (Hugging Face — free token)",
-             "ollama (local)"],
-            index=["none", "hf", "ollama"].index(
-                st.session_state.ai_provider
-                if st.session_state.ai_provider in ("none", "hf", "ollama")
-                else "none"
-            ),
+            _providers,
+            index=_idx,
             key="_provider_sel",
         )
         st.session_state.ai_provider = _provider.split()[0]
+        _prov = st.session_state.ai_provider
 
-        if st.session_state.ai_provider == "hf":
+        if _prov == "claude":
+            _tok = st.text_input(
+                "Anthropic API key",
+                value=st.session_state.api_key,
+                type="password",
+                placeholder="sk-ant-…",
+                help="Get a key at console.anthropic.com",
+            )
+            st.session_state.api_key = _tok
+            st.caption("Uses **claude-opus-4-5** with vision — full forensic analysis + blueprint SVG.")
+        elif _prov == "openai":
+            _tok = st.text_input(
+                "OpenAI API key",
+                value=st.session_state.api_key,
+                type="password",
+                placeholder="sk-…",
+                help="Get a key at platform.openai.com",
+            )
+            st.session_state.api_key = _tok
+            st.caption("Uses **gpt-4o** with vision — full forensic analysis + blueprint SVG.")
+        elif _prov == "hf":
             _tok = st.text_input(
                 "Hugging Face token",
                 value=st.session_state.api_key,
@@ -1212,7 +1389,8 @@ if st.session_state.wizard_step == "identify":
                 help="Free token at huggingface.co/settings/tokens",
             )
             st.session_state.api_key = _tok
-        elif st.session_state.ai_provider == "ollama":
+            st.caption("Uses BLIP captioning + Mistral-7B text analysis.")
+        elif _prov == "ollama":
             st.caption("Make sure `ollama serve` is running on localhost:11434 "
                        "with the `llava` model pulled.")
 
@@ -1646,21 +1824,48 @@ if st.session_state.wizard_step == "results":
 
     c_info, c_badge = st.columns([2, 1])
     with c_info:
-        if res.get("caption"):
+        # Part identification (vision AI)
+        if res.get("part_name"):
+            pmodel = f" — *{res['part_model']}*" if res.get("part_model") else ""
+            st.markdown(f"**Part:** {res['part_name']}{pmodel}")
+        elif res.get("caption"):
             st.markdown(f"**Photo:** {res['caption']}")
+
         desc = res.get("project_description") or tmpl["description"]
         st.markdown(f"**Plan:** {desc}")
         st.markdown(f"**Template:** {tmpl['name']}")
         st.caption(f"Method: {res.get('method', 'keyword')}")
         if res.get("warning"):
             st.warning(res["warning"])
+
+        # Search terms chips (vision AI only)
+        terms = res.get("search_terms") or []
+        if terms:
+            chips = "".join(
+                f'<span style="display:inline-block;background:#e3f2fd;'
+                f'border:1px solid #90caf9;border-radius:12px;'
+                f'padding:2px 10px;margin:2px;font-size:11px;color:#1565c0">'
+                f'{t}</span>'
+                for t in terms
+            )
+            st.markdown(
+                f'<div style="margin-top:6px"><span style="font-size:12px;'
+                f'color:#888">🔎 Search: </span>{chips}</div>',
+                unsafe_allow_html=True,
+            )
+
     with c_badge:
+        is_vision = "vision" in res.get("method", "")
+        badge_bg  = "#e8f4f8" if not is_vision else "#e8f5e9"
+        badge_ico = "🖨️" if not is_vision else "🤖"
         st.markdown(
-            f'<div style="background:#e8f4f8;border-radius:10px;padding:14px;'
+            f'<div style="background:{badge_bg};border-radius:10px;padding:14px;'
             f'text-align:center;margin-top:4px">'
-            f'<div style="font-size:32px">🖨️</div>'
+            f'<div style="font-size:32px">{badge_ico}</div>'
             f'<div style="font-weight:700;font-size:13px;margin-top:4px">'
-            f'{tmpl["category"]}</div></div>',
+            f'{tmpl["category"]}</div>'
+            f'{"<div style=\\"font-size:10px;color:#388e3c;margin-top:4px\\">AI Vision ✨</div>" if is_vision else ""}'
+            f'</div>',
             unsafe_allow_html=True,
         )
 
@@ -1755,11 +1960,21 @@ if st.session_state.wizard_step == "results":
 
     # ── Measurement diagram ───────────────────────────────────────────────────
     st.markdown("#### 📐 Measurement diagram")
-    svg_html = part_svg(tmpl["id"], st.session_state.dim_values)
-    st.markdown(
-        f'<div style="text-align:center;margin:8px 0">{svg_html}</div>',
-        unsafe_allow_html=True,
-    )
+    _ai_svg = res.get("ai_svg", "")
+    if _ai_svg and _ai_svg.strip().startswith("<svg"):
+        # Vision AI returned a blueprint — display it directly
+        st.markdown(
+            f'<div style="text-align:center;margin:8px 0;'
+            f'border-radius:10px;overflow:hidden">{_ai_svg}</div>',
+            unsafe_allow_html=True,
+        )
+        st.caption("Blueprint generated by AI vision analysis.")
+    else:
+        svg_html = part_svg(tmpl["id"], st.session_state.dim_values)
+        st.markdown(
+            f'<div style="text-align:center;margin:8px 0">{svg_html}</div>',
+            unsafe_allow_html=True,
+        )
 
     # ── Confirmation buttons ──────────────────────────────────────────────────
     st.markdown("**Does this look right?**")
