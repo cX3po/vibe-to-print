@@ -1,1990 +1,1906 @@
 """
-Universal Vibe-to-Print Engine
-A mobile-first Streamlit app for photo → OpenSCAD → G-code → Printer.
+vibe_to_print.py
+================
+Single-file, zero-dependency Vibe-to-Print application.
+Run with:  streamlit run vibe_to_print.py
+
+All templates, AI logic, 3D viewer HTML, and slicer are embedded
+directly — no external module imports required beyond the pip packages
+listed in requirements.txt.
 """
+
+from __future__ import annotations
 
 import base64
 import hashlib
+import math
+import re
+import json
+import shutil
+import subprocess
+import time
 import tempfile
 import urllib.parse
 from pathlib import Path
 
+import requests
 import streamlit as st
-import streamlit.components.v1 as components
-
-import ai_brains        as ab
-import caliper_guide    as cg
-import deep_search      as ds
-import getting_started  as gs
-import printer_profiles as pp
-import project_manager  as pm
-import pwa
-import scale_inference  as si
-import slicer           as sl
-import template_library as tl
-import transfer         as tr
-import viewer3d         as v3d
-import hf_identify      as hfi
-import web_search       as ws
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Page config & mobile-first CSS
+# INTERNAL TEMPLATES  (all 12 parametric OpenSCAD designs, embedded)
+# ══════════════════════════════════════════════════════════════════════════════
+
+INTERNAL_TEMPLATES: list[dict] = [
+
+    # ── 1. Round Knob — D-Shaft ───────────────────────────────────────────────
+    {
+        "id":          "knob_d_shaft",
+        "name":        "Round Knob (D-Shaft)",
+        "category":    "Knobs & Controls",
+        "tags":        ["knob", "dial", "control", "pot", "potentiometer",
+                        "radio", "audio", "stove", "d-shaft", "replacement"],
+        "description": "Classic cylindrical knob for a D-shaft pot or switch.",
+        "dims": [
+            {"id": "shaft_d",     "question": "Shaft outer diameter (mm)",           "default": 6.35, "unit": "mm"},
+            {"id": "flat_cut",    "question": "D-flat depth — cut from centre (mm)", "default": 0.7,  "unit": "mm"},
+            {"id": "shaft_depth", "question": "Depth of the shaft hole (mm)",        "default": 15,   "unit": "mm"},
+            {"id": "knob_d",      "question": "Knob outer diameter (mm)",            "default": 30,   "unit": "mm"},
+            {"id": "knob_h",      "question": "Knob total height (mm)",              "default": 22,   "unit": "mm"},
+            {"id": "grip_ridges", "question": "Number of grip ridges (0 = smooth)",  "default": 12,   "unit": ""},
+        ],
+        "scad_modules": """\
+module d_hole() {
+    union() {
+        cylinder(h = shaft_depth + 1, d = shaft_d, $fn = 64);
+        translate([shaft_d/2 - flat_cut, -(shaft_d + 2)/2, -0.5])
+            cube([flat_cut + 1.5, shaft_d + 2, shaft_depth + 2]);
+    }
+}
+module knob_body() {
+    union() {
+        cylinder(h = knob_h, d = knob_d, $fn = 64);
+        if (grip_ridges > 0) {
+            for (i = [0 : grip_ridges - 1]) {
+                rotate([0, 0, i * 360 / grip_ridges])
+                    translate([knob_d/2, 0, knob_h * 0.15])
+                        cylinder(h = knob_h * 0.7, d = 2.8, $fn = 16);
+            }
+        }
+    }
+}
+module knob() {
+    difference() {
+        knob_body();
+        translate([0, 0, -0.5]) d_hole();
+        translate([0, 0, knob_h - 1.5])
+            cylinder(h = 3, d1 = knob_d - 0.01, d2 = knob_d + 5, $fn = 64);
+    }
+}""",
+        "scad_call": "knob()",
+    },
+
+    # ── 2. Round Knob — Round Shaft + Set-Screw ───────────────────────────────
+    {
+        "id":          "knob_round_shaft",
+        "name":        "Round Knob (Round Shaft + Set-Screw)",
+        "category":    "Knobs & Controls",
+        "tags":        ["knob", "round shaft", "set screw", "dial", "control",
+                        "replacement", "audio"],
+        "description": "Knob with a round bore and a side set-screw hole for locking.",
+        "dims": [
+            {"id": "shaft_d",     "question": "Shaft outer diameter (mm)",          "default": 6.0,  "unit": "mm"},
+            {"id": "shaft_depth", "question": "Depth of the shaft hole (mm)",       "default": 15,   "unit": "mm"},
+            {"id": "set_screw_d", "question": "Set-screw hole diameter (M3 = 2.5)", "default": 2.5,  "unit": "mm"},
+            {"id": "knob_d",      "question": "Knob outer diameter (mm)",           "default": 30,   "unit": "mm"},
+            {"id": "knob_h",      "question": "Knob total height (mm)",             "default": 22,   "unit": "mm"},
+            {"id": "grip_ridges", "question": "Number of grip ridges (0 = smooth)", "default": 12,   "unit": ""},
+        ],
+        "scad_modules": """\
+module round_shaft_hole() {
+    cylinder(h = shaft_depth + 1, d = shaft_d, $fn = 64);
+}
+module set_screw_channel() {
+    translate([0, 0, 8])
+        rotate([90, 0, 0])
+            cylinder(h = knob_d, d = set_screw_d, center = true, $fn = 32);
+}
+module knob_body() {
+    union() {
+        cylinder(h = knob_h, d = knob_d, $fn = 64);
+        if (grip_ridges > 0) {
+            for (i = [0 : grip_ridges - 1]) {
+                rotate([0, 0, i * 360 / grip_ridges])
+                    translate([knob_d/2, 0, knob_h * 0.15])
+                        cylinder(h = knob_h * 0.7, d = 2.8, $fn = 16);
+            }
+        }
+    }
+}
+module knob() {
+    difference() {
+        knob_body();
+        translate([0, 0, -0.5]) round_shaft_hole();
+        set_screw_channel();
+        translate([0, 0, knob_h - 1.5])
+            cylinder(h = 3, d1 = knob_d - 0.01, d2 = knob_d + 5, $fn = 64);
+    }
+}""",
+        "scad_call": "knob()",
+    },
+
+    # ── 3. Pointer Knob ───────────────────────────────────────────────────────
+    {
+        "id":          "knob_pointer",
+        "name":        "Pointer Knob (D-Shaft, Indicator Line)",
+        "category":    "Knobs & Controls",
+        "tags":        ["knob", "pointer", "indicator", "dial", "audio",
+                        "vintage", "radio", "d-shaft"],
+        "description": "Flat-top knob with a raised pointer line and D-shaft bore.",
+        "dims": [
+            {"id": "shaft_d",     "question": "Shaft outer diameter (mm)",      "default": 6.35, "unit": "mm"},
+            {"id": "flat_cut",    "question": "D-flat depth from centre (mm)",   "default": 0.7,  "unit": "mm"},
+            {"id": "shaft_depth", "question": "Depth of the shaft hole (mm)",    "default": 15,   "unit": "mm"},
+            {"id": "knob_d",      "question": "Knob outer diameter (mm)",        "default": 35,   "unit": "mm"},
+            {"id": "knob_h",      "question": "Knob height (mm)",                "default": 18,   "unit": "mm"},
+            {"id": "pointer_w",   "question": "Pointer line width (mm)",         "default": 3,    "unit": "mm"},
+        ],
+        "scad_modules": """\
+module d_hole() {
+    union() {
+        cylinder(h = shaft_depth + 1, d = shaft_d, $fn = 64);
+        translate([shaft_d/2 - flat_cut, -(shaft_d + 2)/2, -0.5])
+            cube([flat_cut + 1.5, shaft_d + 2, shaft_depth + 2]);
+    }
+}
+module pointer_line() {
+    translate([-pointer_w/2, 0, knob_h - 1])
+        cube([pointer_w, knob_d/2 - 1, 2]);
+}
+module knob() {
+    difference() {
+        union() {
+            cylinder(h = knob_h, d = knob_d, $fn = 64);
+            pointer_line();
+        }
+        translate([0, 0, -0.5]) d_hole();
+    }
+}""",
+        "scad_call": "knob()",
+    },
+
+    # ── 4. Simple Box (Open Top) ──────────────────────────────────────────────
+    {
+        "id":          "box_open",
+        "name":        "Simple Box (Open Top)",
+        "category":    "Enclosures & Boxes",
+        "tags":        ["box", "tray", "container", "organiser", "storage",
+                        "open", "shelf"],
+        "description": "Hollow rectangular box with no lid — useful as a tray or drawer organiser.",
+        "dims": [
+            {"id": "inner_w",  "question": "Inner width (mm)",      "default": 80,  "unit": "mm"},
+            {"id": "inner_d",  "question": "Inner depth (mm)",       "default": 60,  "unit": "mm"},
+            {"id": "inner_h",  "question": "Inner height (mm)",      "default": 40,  "unit": "mm"},
+            {"id": "wall",     "question": "Wall thickness (mm)",    "default": 2.5, "unit": "mm"},
+            {"id": "corner_r", "question": "Corner radius (mm)",     "default": 3,   "unit": "mm"},
+        ],
+        "scad_modules": """\
+module rounded_box(w, d, h, r) {
+    hull() {
+        for (x = [r, w - r]) for (y = [r, d - r])
+            translate([x, y, 0]) cylinder(h = h, r = r, $fn = 32);
+    }
+}
+module box() {
+    outer_w = inner_w + 2 * wall;
+    outer_d = inner_d + 2 * wall;
+    outer_h = inner_h + wall;
+    difference() {
+        rounded_box(outer_w, outer_d, outer_h, corner_r);
+        translate([wall, wall, wall])
+            rounded_box(inner_w, inner_d, outer_h, max(corner_r - wall, 0.5));
+    }
+}""",
+        "scad_call": "box()",
+    },
+
+    # ── 5. Box with Press-Fit Lid ─────────────────────────────────────────────
+    {
+        "id":          "box_with_lid",
+        "name":        "Box with Press-Fit Lid",
+        "category":    "Enclosures & Boxes",
+        "tags":        ["box", "lid", "enclosure", "case", "container",
+                        "electronics", "project box"],
+        "description": "Rectangular box with a matching press-fit lid. Prints as two parts.",
+        "dims": [
+            {"id": "inner_w",  "question": "Inner width (mm)",        "default": 80,  "unit": "mm"},
+            {"id": "inner_d",  "question": "Inner depth (mm)",         "default": 60,  "unit": "mm"},
+            {"id": "inner_h",  "question": "Box inner height (mm)",   "default": 30,  "unit": "mm"},
+            {"id": "lid_h",    "question": "Lid height (mm)",          "default": 8,   "unit": "mm"},
+            {"id": "wall",     "question": "Wall thickness (mm)",      "default": 2.5, "unit": "mm"},
+            {"id": "fit_gap",  "question": "Lid press-fit gap (mm)",   "default": 0.3, "unit": "mm"},
+        ],
+        "scad_modules": """\
+module box_body() {
+    outer_w = inner_w + 2 * wall;
+    outer_d = inner_d + 2 * wall;
+    outer_h = inner_h + wall;
+    difference() {
+        cube([outer_w, outer_d, outer_h]);
+        translate([wall, wall, wall]) cube([inner_w, inner_d, outer_h]);
+    }
+}
+module lid() {
+    outer_w = inner_w + 2 * wall;
+    outer_d = inner_d + 2 * wall;
+    rim_w   = inner_w - 2 * fit_gap;
+    rim_d   = inner_d - 2 * fit_gap;
+    union() {
+        cube([outer_w, outer_d, wall]);
+        translate([wall + fit_gap, wall + fit_gap, wall])
+            cube([rim_w, rim_d, lid_h - wall]);
+    }
+}
+module both_parts() {
+    box_body();
+    translate([inner_w + 2 * wall + 10, 0, 0]) lid();
+}""",
+        "scad_call": "both_parts()",
+    },
+
+    # ── 6. End Cap / Tube Plug ────────────────────────────────────────────────
+    {
+        "id":          "end_cap",
+        "name":        "End Cap / Tube Plug",
+        "category":    "Caps & Plugs",
+        "tags":        ["cap", "plug", "end cap", "tube", "pipe", "cover",
+                        "stopper", "fitting"],
+        "description": "Cylindrical plug that inserts into a tube end, with a retention flange.",
+        "dims": [
+            {"id": "plug_d",   "question": "Plug diameter — fits INSIDE tube (mm)",    "default": 24.0, "unit": "mm"},
+            {"id": "plug_h",   "question": "Plug insertion depth (mm)",                "default": 15,   "unit": "mm"},
+            {"id": "flange_d", "question": "Flange diameter — sits outside tube (mm)", "default": 29,   "unit": "mm"},
+            {"id": "flange_h", "question": "Flange thickness (mm)",                    "default": 3,    "unit": "mm"},
+            {"id": "bore_d",   "question": "Centre bore diameter (0 = solid) (mm)",    "default": 0,    "unit": "mm"},
+        ],
+        "scad_modules": """\
+module end_cap() {
+    difference() {
+        union() {
+            cylinder(h = plug_h, d = plug_d, $fn = 64);
+            cylinder(h = flange_h, d = flange_d, $fn = 64);
+        }
+        if (bore_d > 0) {
+            translate([0, 0, -0.5])
+                cylinder(h = plug_h + flange_h + 1, d = bore_d, $fn = 64);
+        }
+    }
+}""",
+        "scad_call": "end_cap()",
+    },
+
+    # ── 7. L-Bracket ─────────────────────────────────────────────────────────
+    {
+        "id":          "l_bracket",
+        "name":        "L-Bracket (Right-Angle Mount)",
+        "category":    "Brackets & Mounts",
+        "tags":        ["bracket", "l bracket", "mount", "angle", "shelf",
+                        "support", "right angle", "hardware"],
+        "description": "Right-angle mounting bracket with a configurable hole pattern.",
+        "dims": [
+            {"id": "width",        "question": "Bracket width (into page) (mm)", "default": 30,  "unit": "mm"},
+            {"id": "arm1_len",     "question": "Vertical arm length (mm)",        "default": 50,  "unit": "mm"},
+            {"id": "arm2_len",     "question": "Horizontal arm length (mm)",      "default": 50,  "unit": "mm"},
+            {"id": "thickness",    "question": "Material thickness (mm)",         "default": 4.5, "unit": "mm"},
+            {"id": "hole_d",       "question": "Mounting hole diameter (mm)",     "default": 4.5, "unit": "mm"},
+            {"id": "holes_per_arm","question": "Holes per arm (1 or 2)",          "default": 2,   "unit": ""},
+        ],
+        "scad_modules": """\
+module arm(length) {
+    cube([thickness, width, length]);
+}
+module hole_pattern(arm_length) {
+    spacing = arm_length / (holes_per_arm + 1);
+    for (i = [1 : holes_per_arm])
+        translate([thickness/2, width/2, i * spacing])
+            rotate([0, 90, 0])
+                cylinder(h = thickness + 1, d = hole_d, center = true, $fn = 32);
+}
+module l_bracket() {
+    difference() {
+        union() {
+            arm(arm1_len);
+            rotate([0, -90, 0]) translate([-arm2_len, 0, 0]) arm(arm2_len);
+        }
+        hole_pattern(arm1_len);
+        rotate([0, -90, 0]) translate([-arm2_len, 0, 0]) hole_pattern(arm2_len);
+    }
+}""",
+        "scad_call": "l_bracket()",
+    },
+
+    # ── 8. Cable Clip ─────────────────────────────────────────────────────────
+    {
+        "id":          "cable_clip",
+        "name":        "Snap-On Cable Clip",
+        "category":    "Cable Management",
+        "tags":        ["cable", "clip", "wire", "organiser", "holder",
+                        "snap", "mount", "desk"],
+        "description": "Snap-on clip to route cables along walls or desks.",
+        "dims": [
+            {"id": "cable_d", "question": "Cable outer diameter (mm)",                "default": 6,   "unit": "mm"},
+            {"id": "clip_w",  "question": "Clip width (mm)",                          "default": 18,  "unit": "mm"},
+            {"id": "wall_t",  "question": "Clip wall thickness (mm)",                 "default": 2.5, "unit": "mm"},
+            {"id": "base_h",  "question": "Mounting base height (mm)",                "default": 8,   "unit": "mm"},
+            {"id": "screw_d", "question": "Mounting screw hole diameter (mm)",        "default": 3.5, "unit": "mm"},
+            {"id": "gap",     "question": "Snap-in gap opening (% of cable_d, 60–80)","default": 70,  "unit": "%"},
+        ],
+        "scad_modules": """\
+module cable_clip() {
+    r      = cable_d / 2 + wall_t;
+    gap_mm = cable_d * gap / 100;
+    difference() {
+        union() {
+            translate([-r, -r, 0]) cube([r * 2, r + wall_t, base_h]);
+            translate([0, 0, base_h])
+                difference() {
+                    cylinder(h = clip_w, r = r, $fn = 64);
+                    translate([0, 0, -0.5]) cylinder(h = clip_w + 1, r = cable_d / 2, $fn = 64);
+                    translate([-gap_mm/2, -(r + 1), -0.5]) cube([gap_mm, r + 2, clip_w + 1]);
+                }
+        }
+        translate([0, -r/2, -0.5]) cylinder(h = base_h + 1, d = screw_d, $fn = 32);
+    }
+}""",
+        "scad_call": "cable_clip()",
+    },
+
+    # ── 9. Wall Hook ──────────────────────────────────────────────────────────
+    {
+        "id":          "wall_hook",
+        "name":        "Wall Hook",
+        "category":    "Hooks & Hangers",
+        "tags":        ["hook", "wall", "hanger", "coat", "key", "mount",
+                        "screw", "organiser"],
+        "description": "Simple wall-mounted hook with screw holes in the backplate.",
+        "dims": [
+            {"id": "plate_w",    "question": "Backplate width (mm)",       "default": 40,  "unit": "mm"},
+            {"id": "plate_h",    "question": "Backplate height (mm)",      "default": 60,  "unit": "mm"},
+            {"id": "plate_t",    "question": "Backplate thickness (mm)",   "default": 5,   "unit": "mm"},
+            {"id": "hook_reach", "question": "Hook reach from wall (mm)",  "default": 40,  "unit": "mm"},
+            {"id": "hook_t",     "question": "Hook arm thickness (mm)",    "default": 6,   "unit": "mm"},
+            {"id": "tip_h",      "question": "Hook tip height (mm)",       "default": 20,  "unit": "mm"},
+            {"id": "screw_d",    "question": "Screw hole diameter (mm)",   "default": 4.5, "unit": "mm"},
+        ],
+        "scad_modules": """\
+module backplate() { cube([plate_w, plate_t, plate_h]); }
+module hook_arm() {
+    translate([plate_w/2 - hook_t/2, 0, plate_h * 0.4])
+        cube([hook_t, hook_reach, hook_t]);
+    translate([plate_w/2 - hook_t/2, hook_reach - hook_t, plate_h * 0.4])
+        cube([hook_t, hook_t, tip_h]);
+}
+module screw_holes() {
+    for (z_off = [plate_h * 0.2, plate_h * 0.75])
+        translate([plate_w/2, plate_t/2, z_off])
+            rotate([90, 0, 0])
+                cylinder(h = plate_t + 1, d = screw_d, center = true, $fn = 32);
+}
+module wall_hook() {
+    difference() {
+        union() { backplate(); hook_arm(); }
+        screw_holes();
+    }
+}""",
+        "scad_call": "wall_hook()",
+    },
+
+    # ── 10. Spacer / Washer ───────────────────────────────────────────────────
+    {
+        "id":          "spacer",
+        "name":        "Spacer / Washer",
+        "category":    "Fasteners & Hardware",
+        "tags":        ["spacer", "washer", "standoff", "shim", "bushing",
+                        "ring", "gap", "fastener"],
+        "description": "Flat ring spacer — useful as a washer, standoff shim, or bearing sleeve.",
+        "dims": [
+            {"id": "outer_d", "question": "Outer diameter (mm)",              "default": 20, "unit": "mm"},
+            {"id": "inner_d", "question": "Bore / hole diameter (mm)",        "default": 5,  "unit": "mm"},
+            {"id": "height",  "question": "Spacer height / thickness (mm)",   "default": 5,  "unit": "mm"},
+        ],
+        "scad_modules": """\
+module spacer() {
+    difference() {
+        cylinder(h = height, d = outer_d, $fn = 64);
+        translate([0, 0, -0.5]) cylinder(h = height + 1, d = inner_d, $fn = 64);
+    }
+}""",
+        "scad_call": "spacer()",
+    },
+
+    # ── 11. Drawer Pull / Handle ──────────────────────────────────────────────
+    {
+        "id":          "drawer_pull",
+        "name":        "Drawer Pull / Handle",
+        "category":    "Furniture & Handles",
+        "tags":        ["handle", "drawer pull", "cabinet", "furniture",
+                        "grip", "pull", "knob"],
+        "description": "Horizontal bar handle with two screw mount points.",
+        "dims": [
+            {"id": "span",     "question": "Centre-to-centre hole spacing (mm)", "default": 96,  "unit": "mm"},
+            {"id": "grip_len", "question": "Grip bar total length (mm)",          "default": 110, "unit": "mm"},
+            {"id": "grip_w",   "question": "Grip bar width (mm)",                 "default": 18,  "unit": "mm"},
+            {"id": "grip_h",   "question": "Grip bar height above surface (mm)",  "default": 25,  "unit": "mm"},
+            {"id": "bar_d",    "question": "Grip bar diameter/thickness (mm)",    "default": 14,  "unit": "mm"},
+            {"id": "screw_d",  "question": "Screw hole diameter (mm)",            "default": 4.5, "unit": "mm"},
+        ],
+        "scad_modules": """\
+module end_post() { cylinder(h = grip_h, d = grip_w, $fn = 48); }
+module grip_bar() {
+    hull() {
+        translate([0, 0, grip_h - bar_d/2])
+            rotate([0, 90, 0]) cylinder(h = grip_len, d = bar_d, $fn = 48);
+    }
+}
+module drawer_pull() {
+    offset_x = (grip_len - span) / 2;
+    difference() {
+        union() {
+            translate([offset_x, 0, 0]) end_post();
+            translate([offset_x + span, 0, 0]) end_post();
+            translate([offset_x, -grip_len/2 + grip_w/2, 0])
+                rotate([90, 0, 0]) grip_bar();
+        }
+        translate([offset_x, 0, -0.5]) cylinder(h = grip_h + 1, d = screw_d, $fn = 32);
+        translate([offset_x + span, 0, -0.5]) cylinder(h = grip_h + 1, d = screw_d, $fn = 32);
+    }
+}""",
+        "scad_call": "drawer_pull()",
+    },
+
+    # ── 12. Button / Switch Cap ───────────────────────────────────────────────
+    {
+        "id":          "button_cap",
+        "name":        "Button / Switch Cap",
+        "category":    "Caps & Plugs",
+        "tags":        ["button", "cap", "switch", "electronics", "keyboard",
+                        "push button", "replacement", "stem"],
+        "description": "Replacement push-button cap that slides over a square or round stem.",
+        "dims": [
+            {"id": "cap_d",    "question": "Cap outer diameter (mm)",               "default": 14,  "unit": "mm"},
+            {"id": "cap_h",    "question": "Cap dome height (mm)",                  "default": 7,   "unit": "mm"},
+            {"id": "skirt_h",  "question": "Skirt height around base (mm)",         "default": 3,   "unit": "mm"},
+            {"id": "stem_w",   "question": "Stem socket width (mm) — square stem",  "default": 4,   "unit": "mm"},
+            {"id": "stem_h",   "question": "Stem socket depth (mm)",                "default": 5,   "unit": "mm"},
+            {"id": "stem_gap", "question": "Socket clearance (mm, ~0.2–0.4)",       "default": 0.2, "unit": "mm"},
+        ],
+        "scad_modules": """\
+module button_cap() {
+    socket_w = stem_w + 2 * stem_gap;
+    total_h  = cap_h + skirt_h;
+    difference() {
+        union() {
+            difference() {
+                cylinder(h = skirt_h, d = cap_d + 2, $fn = 64);
+                translate([0, 0, -0.5]) cylinder(h = skirt_h + 1, d = cap_d - 2, $fn = 64);
+            }
+            translate([0, 0, skirt_h]) cylinder(h = cap_h, d = cap_d, $fn = 64);
+        }
+        translate([-socket_w/2, -socket_w/2, -0.5]) cube([socket_w, socket_w, stem_h + 0.5]);
+    }
+}""",
+        "scad_call": "button_cap()",
+    },
+]
+
+# ── Template helpers ──────────────────────────────────────────────────────────
+
+_TMPL_BY_ID: dict[str, dict] = {t["id"]: t for t in INTERNAL_TEMPLATES}
+TMPL_CATEGORIES: list[str] = sorted({t["category"] for t in INTERNAL_TEMPLATES})
+
+
+def tmpl_get(tid: str) -> dict | None:
+    return _TMPL_BY_ID.get(tid)
+
+
+def tmpl_search(query: str = "", category: str = "") -> list[dict]:
+    q = query.strip().lower()
+    results = []
+    for t in INTERNAL_TEMPLATES:
+        if category and category != "All" and t["category"] != category:
+            continue
+        if not q:
+            results.append((0, t))
+            continue
+        score = 0
+        if q in t["name"].lower():        score += 3
+        if q in t["description"].lower(): score += 2
+        for tag in t["tags"]:
+            if q in tag:                  score += 1
+        if score:
+            results.append((score, t))
+    results.sort(key=lambda x: -x[0])
+    return [t for _, t in results]
+
+
+def tmpl_generate_scad(template: dict, dim_values: dict[str, str],
+                        bed_cx: float = 117.5, bed_cy: float = 117.5) -> str:
+    def _parse_num(raw: str, default: float) -> str:
+        raw = raw.strip()
+        if not raw:
+            return str(default)
+        part = raw.split()[0]
+        try:
+            float(part); return part
+        except ValueError:
+            return str(default)
+
+    lines = [
+        "// Vibe-to-Print — Single-File Edition",
+        f"// Template : {template['name']}",
+        f"// Generated: {time.strftime('%Y-%m-%d %H:%M')}",
+        "",
+        "// ── Dimensions ─────────────────────────────────────────────",
+    ]
+    for dim in template["dims"]:
+        val  = _parse_num(dim_values.get(dim["id"], ""), dim["default"])
+        unit = f" // {dim['unit']}" if dim["unit"] else ""
+        lines.append(f"{dim['id']} = {val};{unit}  // {dim['question']}")
+    lines += [
+        "",
+        "// ── Modules ──────────────────────────────────────────────────",
+        "",
+        template["scad_modules"].strip(),
+        "",
+        "// ── Place on bed ─────────────────────────────────────────────",
+        f"translate([{bed_cx:.2f}, {bed_cy:.2f}, 0])",
+        f"  {template['scad_call']};",
+    ]
+    return "\n".join(lines)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PAGE CONFIG & CSS
 # ══════════════════════════════════════════════════════════════════════════════
 
 st.set_page_config(
-    page_title="Vibe-to-Print Engine",
+    page_title="Vibe-to-Print",
     page_icon="🖨️",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
 
-pwa.inject()   # PWA meta tags — must come right after set_page_config
-
 st.markdown("""
 <style>
-/* ── Strip Streamlit chrome ───────────────────────────────────── */
 footer { display: none !important; }
-header[data-testid="stHeader"] { height: 2.2rem !important; min-height: 2.2rem !important; }
+header[data-testid="stHeader"] { height: 2rem !important; min-height: 2rem !important; }
 #MainMenu { visibility: hidden; }
-
-/* ── Remove excessive container padding ───────────────────────── */
 .main .block-container {
-    padding-top: 0.4rem !important;
+    padding-top: 0 !important;
     padding-bottom: 0.5rem !important;
-    padding-left: 0.75rem !important;
-    padding-right: 0.75rem !important;
+    padding-left: 1rem !important;
+    padding-right: 1rem !important;
     max-width: 100% !important;
 }
-
-/* ── Global font ──────────────────────────────────────────────── */
 html, body, [class*="css"] { font-size: 15px !important; }
-
-/* ── Headings — no excess margin ─────────────────────────────── */
-h1, h2, h3 {
-    margin-top: 0.1rem !important;
-    margin-bottom: 0.2rem !important;
-    line-height: 1.2 !important;
-}
-p { margin-bottom: 0.3rem !important; }
-
-/* ── All secondary buttons — compact touch targets ────────────── */
+h1, h2, h3 { margin-top: 0.1rem !important; margin-bottom: 0.2rem !important; }
 div.stButton > button {
-    min-height: 42px !important;
-    font-size: 14px !important;
+    min-height: 44px !important;
+    font-size: 15px !important;
     font-weight: 600 !important;
     border-radius: 10px !important;
     width: 100%;
-    padding: 4px 8px !important;
+    padding: 4px 10px !important;
 }
-
-/* ── Primary action buttons — large for thumb taps ────────────── */
 div.stButton > button[kind="primary"] {
     min-height: 56px !important;
-    font-size: 17px !important;
-    font-weight: 700 !important;
-    background: #e94560 !important;
-    color: #ffffff !important;
-    border: none !important;
-}
-div.stButton > button[kind="primary"]:hover { background: #c73050 !important; }
-
-/* ── Download buttons ─────────────────────────────────────────── */
-div.stDownloadButton > button {
-    min-height: 46px !important;
-    font-size: 15px !important;
-    font-weight: 700 !important;
-    background: #2d6a4f !important;
-    color: #ffffff !important;
-    border: none !important;
-    border-radius: 10px !important;
-    width: 100%;
-}
-
-/* ── Upload area — compact on mobile ──────────────────────────── */
-section[data-testid="stFileUploader"] > div {
-    min-height: 70px !important;
-    font-size: 14px !important;
-    padding: 8px !important;
-}
-
-/* ── Camera widget — full-width prominent ─────────────────────── */
-section[data-testid="stCameraInput"] > div {
+    font-size: 18px !important;
     border-radius: 12px !important;
 }
-
-/* ── Text areas & inputs ──────────────────────────────────────── */
-textarea { font-size: 15px !important; }
-input[type="text"], input[type="password"], input[type="number"] {
-    font-size: 15px !important;
-}
-
-/* ── Dim input colour coding ──────────────────────────────────── */
-div[data-suggested="true"] input {
-    background-color: rgba(58,120,201,0.18) !important;
-    border-color: #4a9eff !important; border-width: 2px !important;
-}
-div[data-verified="true"] input {
-    background-color: rgba(45,106,79,0.20) !important;
-    border-color: #52b788 !important; border-width: 2px !important;
-}
-div[data-userentered="true"] input {
-    background-color: rgba(180,180,180,0.08) !important;
-    border-color: #8899aa !important; border-width: 2px !important;
-}
-
-/* ── Expanders — compact ──────────────────────────────────────── */
-details summary { font-size: 13px !important; padding: 4px 0 !important; }
-
-/* ── Alerts — smaller padding ─────────────────────────────────── */
-div[data-testid="stAlert"] { padding: 8px 12px !important; font-size: 13px !important; }
-
-/* ── Dividers — thinner ───────────────────────────────────────── */
-hr { margin: 0.4rem 0 !important; }
-
-/* ── Phase badge (legacy, kept for getting_started) ───────────── */
-.phase-badge {
-    display: inline-block; padding: 4px 14px; border-radius: 20px;
-    font-size: 13px; font-weight: 700; margin-bottom: 8px;
-}
-.phase-a { background:#1d3557; color:#a8dadc; }
-.phase-b { background:#2d6a4f; color:#b7e4c7; }
-.phase-c { background:#7b2d8b; color:#e0aaff; }
-.phase-x { background:#b5451b; color:#ffd6a5; }
 </style>
 """, unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Constants
+# SESSION STATE DEFAULTS
 # ══════════════════════════════════════════════════════════════════════════════
 
-MATERIAL_TEMPS = {
-    "PLA":  {"hotend": 210, "bed": 60},
-    "PETG": {"hotend": 235, "bed": 85},
-    "ABS":  {"hotend": 245, "bed": 110},
+_DEFAULTS: dict = {
+    "wizard_step":        "welcome",   # welcome | identify | dimensions | cad | slice
+    "captured_images":    [],
+    "camera_counter":     0,
+    "last_cam_hash":      "",
+    "image_bytes":        None,
+    "image_name":         "",
+    "image_media_type":   "image/jpeg",
+    "vibe_description":   "",
+    "identify_result":    None,        # dict from identify pipeline
+    "selected_template":  None,        # template dict
+    "dim_values":         {},          # {dim_id: str}
+    "scad_code":          "",
+    "api_key":            "",          # HF / Claude / OpenAI token
+    "ai_provider":        "none",      # none | hf | claude | openai | ollama
+    "show_refinement":    False,       # toggle refinement panel in results step
 }
 
-PHASES = ["getting_started", "vision", "deep_review", "dimensions",
-          "cad", "slicer", "export"]
-
-PHASE_LABELS = {
-    "getting_started": ("?", "Getting Started",  "phase-a"),
-    "vision":          ("A", "The Vision",       "phase-a"),
-    "deep_review":     ("A", "Deep Search",      "phase-a"),
-    "dimensions":      ("A", "Measuring Up",     "phase-a"),
-    "cad":             ("B", "The CAD",          "phase-b"),
-    "slicer":          ("C", "The Slicer",       "phase-c"),
-    "export":          ("X", "Export & Send",    "phase-x"),
-}
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Session-state initialisation
-# ══════════════════════════════════════════════════════════════════════════════
-
-_DEFAULTS = {
-    "phase":             "vision",
-    "image_bytes":       None,
-    "image_name":        "",
-    "image_media_type":  "image/jpeg",
-    "vibe_description":  "",
-    "object_summary":    "",
-    "required_dims":     [],   # [{id, question, prefill?}]
-    "dim_answers":       {},   # {id: "question – value mm"}
-    "openscad_code":     "",
-    "openscad_notes":    "",
-    "work_dir":          None, # str path
-    "stl_path":          None, # str path
-    "gcode_path":        None, # str path
-    "slicer_log":        "",
-    "active_profile":    None,
-    "material":          "PLA",
-    # Deep Search
-    "ds_result":         None,  # dict (DeepSearchResult.as_dict())
-    "ds_confirmed":      False,
-    # Scale inference
-    "scale_meta":        None,  # {scaling_method, reference_detected, scale_note}
-    "ref_obj_key":       "auto",
-    # Smart Suggestions / dimension confirmation
-    "dim_values":        {},    # {id: current string value}
-    "dim_statuses":      {},    # {id: "suggested"|"verified"|"user_entered"|"empty"}
-    "dims_confirmed":    False,
-    # Getting Started
-    "gs_test_ok":        None,
-    "gs_test_message":   "",
-    "gs_test_detail":    "",
-    "gs_pending_key":    None,
-    "gs_video_url":      "",
-    # Hugging Face provider
-    "hf_vision_model":   ab.HF_VISION_MODEL_DEFAULT,
-    "hf_text_model":     ab.HF_TEXT_MODEL_DEFAULT,
-    # Manual / Template mode
-    "selected_template_id": None,   # template chosen in template browser
-    # Multi-photo capture
-    "captured_images":      [],     # list of {bytes, name, media_type}
-    "camera_counter":       0,      # incremented each snap to reset the widget
-    "last_cam_hash":        "",     # prevents double-processing same photo
-    # Default AI provider (no-key mode for new users)
-    "ai_provider":          "Manual (No AI — Template Mode)",
-    # Dims fingerprint — detects if measurements changed after SCAD was generated
-    "scad_dims_fp":         "",
-    # Identify result card (persisted across reruns)
-    "_identify_result":     None,   # dict from hfi.identify_object or None
-}
-
-for k, v in _DEFAULTS.items():
-    if k not in st.session_state:
-        st.session_state[k] = v
+for _k, _v in _DEFAULTS.items():
+    if _k not in st.session_state:
+        st.session_state[_k] = _v
 
 
-def reset_to(phase: str) -> None:
-    """Reset session state to the beginning of a given phase."""
-    resets = {
-        "vision":     list(_DEFAULTS.keys()),
-        "dimensions": ["dim_answers", "dim_values", "dim_statuses", "dims_confirmed",
-                       "scale_meta", "openscad_code", "openscad_notes",
-                       "stl_path", "gcode_path", "slicer_log"],
-        "cad":        ["openscad_code", "openscad_notes",
-                       "stl_path", "gcode_path", "slicer_log"],
-        "slicer":     ["stl_path", "gcode_path", "slicer_log"],
-        "export":     [],
-    }
-    for k in resets.get(phase, []):
-        st.session_state[k] = _DEFAULTS[k]
-    st.session_state.phase = phase
+def _go(step: str) -> None:
+    st.session_state.wizard_step = step
+    st.rerun()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Helpers
+# STEP 0 — WELCOME
 # ══════════════════════════════════════════════════════════════════════════════
 
-@st.cache_data(ttl=10)
-def _all_profiles() -> dict:
-    return pp.load_all_profiles()
-
-
-def _is_manual() -> bool:
-    return st.session_state.get("ai_provider") == ab.PROVIDER_MANUAL
-
-
-def _needs_no_key() -> bool:
-    """True for providers that work without a paid API key."""
-    return st.session_state.get("ai_provider") in (
-        ab.PROVIDER_OLLAMA, ab.PROVIDER_HF, ab.PROVIDER_MANUAL
-    )
-
-
-def _get_brain() -> ab.AIBrain:
-    provider = st.session_state.get("ai_provider", ab.PROVIDER_CLAUDE)
-    key      = st.session_state.get("api_key", "")
-    model    = st.session_state.get("model_override", "")
-    return ab.AIBrain(
-        provider, key, model,
-        hf_vision_model=st.session_state.get("hf_vision_model", ab.HF_VISION_MODEL_DEFAULT),
-        hf_text_model=st.session_state.get("hf_text_model",   ab.HF_TEXT_MODEL_DEFAULT),
-    )
-
-
-def _active_profile() -> dict:
-    return st.session_state.active_profile or {
-        "name": "Unknown", "bed_x": 235, "bed_y": 235, "bed_z": 250, "notes": ""
-    }
-
-
-def _work_dir() -> Path:
-    if st.session_state.work_dir is None:
-        td = tempfile.mkdtemp(prefix="vibe_")
-        st.session_state.work_dir = td
-    return Path(st.session_state.work_dir)
-
-
-def _phase_badge(phase: str) -> None:
-    letter, label, css = PHASE_LABELS.get(phase, ("?", phase, "phase-a"))
-    st.markdown(
-        f'<span class="phase-badge {css}">Phase {letter} · {label}</span>',
-        unsafe_allow_html=True,
-    )
-
-
-def _wizard_header(phase: str) -> None:
-    """Interactive wizard navigation — each completed step is a clickable button."""
-    _STEPS = [
-        ("📸", "Snap",    "vision",     ["vision", "deep_review"]),
-        ("📏", "Measure", "dimensions", ["dimensions"]),
-        ("⚙️", "Design",  "cad",        ["cad"]),
-        ("🔪", "Slice",   "slicer",     ["slicer"]),
-        ("🖨️", "Print",   "export",     ["export"]),
-    ]
-    _ORDER = ["vision", "deep_review", "dimensions", "cad", "slicer", "export"]
-    try:
-        cur_idx = _ORDER.index(phase)
-    except ValueError:
-        cur_idx = 0
-
-    # Which phases can the user jump to directly?
-    _reachable = {
-        "vision":      True,
-        "deep_review": bool(st.session_state.get("ds_result")),
-        "dimensions":  bool(st.session_state.get("required_dims")),
-        "cad":         bool(st.session_state.get("openscad_code") or
-                            st.session_state.get("dims_confirmed")),
-        "slicer":      bool(st.session_state.get("openscad_code")),
-        "export":      bool(st.session_state.get("gcode_path")),
-    }
-
-    cols = st.columns(len(_STEPS))
-    for col, (icon, label, target, step_phases) in zip(cols, _STEPS):
-        step_max_idx = max((_ORDER.index(p) for p in step_phases if p in _ORDER), default=0)
-        is_active = phase in step_phases
-        is_done   = cur_idx > step_max_idx
-        can_click = (not is_active) and _reachable.get(target, False)
-
-        disp = f"✓ {label}" if is_done else f"{icon} {label}"
-
-        with col:
-            if col.button(
-                disp,
-                key=f"wiz_{target}",
-                use_container_width=True,
-                disabled=not can_click,
-                type="primary" if is_active else "secondary",
-                help="You're here" if is_active else
-                     ("Jump to this step" if can_click else "Complete earlier steps first"),
-            ):
-                st.session_state.phase = target
-                st.rerun()
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Sidebar
-# ══════════════════════════════════════════════════════════════════════════════
-
-with st.sidebar:
-    # ── Logo ──────────────────────────────────────────────────────────────────
+if st.session_state.wizard_step == "welcome":
     st.markdown("""
-<div style="text-align:center;padding:8px 0 2px">
-  <div style="font-size:24px;font-weight:800;color:#a8dadc;letter-spacing:-0.5px">
-    🖨️ Vibe-to-Print
-  </div>
-  <div style="font-size:12px;color:#4a7090;margin-top:2px">Snap · Measure · Print</div>
-</div>""", unsafe_allow_html=True)
-
-    # ── Quick action row ───────────────────────────────────────────────────────
-    gs_active = st.session_state.phase == "getting_started"
-    qa1, qa2 = st.columns(2)
-    with qa1:
-        if st.button("❓ Help", use_container_width=True,
-                     type="primary" if gs_active else "secondary"):
-            st.session_state.phase = "vision" if gs_active else "getting_started"
-            st.rerun()
-    with qa2:
-        if st.button("↺ Restart", use_container_width=True):
-            reset_to("vision")
-            st.rerun()
-
-    st.divider()
-
-    # ── Quick settings (always visible) ───────────────────────────────────────
-    all_profiles = _all_profiles()
-    profile_names = sorted(all_profiles.keys()) + ["➕ Add New Printer"]
-    chosen  = st.selectbox("🖨️ Printer", profile_names, key="printer_choice")
-    adding  = chosen == "➕ Add New Printer"
-    material = st.selectbox("🧵 Material", list(MATERIAL_TEMPS.keys()), key="material")
-
-    st.divider()
-
-    # ── Advanced Settings expander ─────────────────────────────────────────────
-    with st.expander("⚙️ Advanced Settings", expanded=False):
-
-        # ── AI Brain ──────────────────────────────────────────────────────────
-        st.subheader("AI Brain")
-        provider = st.selectbox(
-            "Select AI provider",
-            ab.ALL_PROVIDERS,
-            key="ai_provider",
-        )
-
-        if provider == ab.PROVIDER_OLLAMA:
-            st.info("Ollama: `ollama serve` must be running on port 11434.\n"
-                    "Vision uses **llava**; code gen uses **llama3**.")
-            st.text_input("Model override (optional)", placeholder="e.g. llava:13b",
-                          key="model_override")
-
-        elif provider == ab.PROVIDER_HF:
-            st.info(
-                "**Free tier** — no credit card needed.\n\n"
-                "Optional token at [huggingface.co/settings/tokens]"
-                "(https://huggingface.co/settings/tokens) for higher rate limits.",
-                icon="🤗",
-            )
-            st.text_input("HF Token (optional)", type="password",
-                          placeholder="hf_...", key="api_key",
-                          help="Read token from huggingface.co/settings/tokens")
-            st.selectbox("Vision model (photos)", ab.HF_VISION_MODELS,
-                         key="hf_vision_model",
-                         help="Used when a photo is attached")
-            st.selectbox("Text model (CAD gen)", ab.HF_TEXT_MODELS,
-                         key="hf_text_model",
-                         help="Used for OpenSCAD code generation")
-
-        elif provider == ab.PROVIDER_MANUAL:
-            st.success(
-                "**No API key needed!**\n\n"
-                "Choose from 12 built-in parametric templates — knobs, boxes, "
-                "brackets, hooks, and more.",
-                icon="🛠️",
-            )
-
-        else:
-            label = "Anthropic API Key" if provider == ab.PROVIDER_CLAUDE else "OpenAI API Key"
-            st.text_input(label, type="password", placeholder="sk-...", key="api_key")
-            st.text_input("Model override (optional)",
-                          placeholder=ab.DEFAULT_MODELS[provider],
-                          key="model_override")
-
-        # ── Bed Dimensions ─────────────────────────────────────────────────────
-        st.divider()
-        st.subheader("Bed Dimensions")
-
-        if adding:
-            new_name = st.text_input("New printer name", placeholder="My CoreXY 300",
-                                     key="new_printer_name")
-            bx, by, bz = 235, 235, 250
-            bnotes = ""
-        else:
-            prof     = all_profiles[chosen]
-            new_name = chosen
-            bx, by, bz = prof["bed_x"], prof["bed_y"], prof["bed_z"]
-            bnotes   = prof.get("notes", "")
-
-        c1, c2, c3 = st.columns(3)
-        bed_x = c1.number_input("X mm", 50, 1500, bx, 5, key="bed_x")
-        bed_y = c2.number_input("Y mm", 50, 1500, by, 5, key="bed_y")
-        bed_z = c3.number_input("Z mm", 50, 1500, bz, 5, key="bed_z")
-        bed_notes = st.text_input("Notes", value=bnotes, key="bed_notes")
-
-        cx_live = bed_x / 2; cy_live = bed_y / 2
-        st.caption(f"Bed centre → X: **{cx_live:.1f}**  Y: **{cy_live:.1f}** mm")
-
-        sc1, sc2 = st.columns(2)
-        with sc1:
-            if st.button("Save Profile", use_container_width=True):
-                tgt = new_name.strip() if adding else chosen
-                if tgt:
-                    pp.save_user_profile(tgt, int(bed_x), int(bed_y), int(bed_z), bed_notes)
-                    st.success(f'Saved "{tgt}"')
-                    st.cache_data.clear()
-                    st.rerun()
-        with sc2:
-            can_del = not adding and pp.is_user_profile(chosen)
-            if st.button("Delete", disabled=not can_del, use_container_width=True,
-                         help="Only user-saved profiles can be deleted"):
-                pp.delete_user_profile(chosen)
-                st.cache_data.clear()
-                st.rerun()
-
-        # ── Temperatures ───────────────────────────────────────────────────────
-        st.divider()
-        _adv_active_p: dict = {
-            "name":  new_name if adding else chosen,
-            "bed_x": int(bed_x), "bed_y": int(bed_y), "bed_z": int(bed_z),
-            "notes": bed_notes,
-        }
-        if not adding:
-            for _k in ("hotend_override", "bed_override"):
-                if _k in all_profiles.get(chosen, {}):
-                    _adv_active_p[_k] = all_profiles[chosen][_k]
-        temps = pp.resolve_temps(_adv_active_p, material, MATERIAL_TEMPS)
-        st.caption(f"Hotend: **{temps['hotend']} °C**  ·  Bed: **{temps['bed']} °C**")
-
-        # ── Deep Search ────────────────────────────────────────────────────────
-        st.divider()
-        st.subheader("Deep Search")
-        ds_enabled = st.toggle(
-            "Enable Deep Search mode",
-            value=False,
-            key="ds_enabled",
-            help="Identifies the exact model and looks up factory specs.",
-        )
-
-        if ds_enabled:
-            st.text_input(
-                "Google Cloud Vision API key",
-                type="password",
-                key="gcv_api_key",
-                placeholder="AIza...",
-                help="Get a key at console.cloud.google.com → Vision API.",
-            )
-            st.selectbox(
-                "Web search provider",
-                ds.ALL_SEARCH_PROVIDERS,
-                key="ds_search_provider",
-                help="Searches for factory specs after identification.",
-            )
-            search_prov = st.session_state.get("ds_search_provider", ds.SEARCH_PROVIDER_AI)
-            if search_prov != ds.SEARCH_PROVIDER_AI:
-                lbl = "SerpAPI key" if "SerpAPI" in search_prov else "Brave API key"
-                st.text_input(lbl, type="password", key="ds_search_api_key",
-                              placeholder="your-key-here")
-            else:
-                st.caption("AI Knowledge Only: no web call — specs from AI training data.")
-
-        # ── Project File ───────────────────────────────────────────────────────
-        st.divider()
-        st.subheader("Project File")
-
-        proj_bytes = pm.to_json_bytes(pm.build_project(st.session_state))
-        st.download_button(
-            label="Save Project (.vtp.json)",
-            data=proj_bytes,
-            file_name=pm.project_filename(st.session_state),
-            mime="application/json",
-            use_container_width=True,
-            help="Save dimensions, AI results, and OpenSCAD code.",
-        )
-
-        proj_upload = st.file_uploader(
-            "Load project file",
-            type=["json"],
-            key="project_upload",
-            help="Restore a previously saved .vtp.json project.",
-        )
-        if proj_upload is not None:
-            try:
-                proj_dict = pm.from_json_bytes(proj_upload.read())
-                restored  = pm.apply_to_session(proj_dict, st.session_state)
-                st.success(f"Loaded — {len(restored)} fields restored.")
-                st.session_state.image_bytes = None
-                st.cache_data.clear()
-                st.rerun()
-            except ValueError as exc:
-                st.error(f"Load failed: {exc}")
-
-        # ── Slicer status ──────────────────────────────────────────────────────
-        st.divider()
-        st.subheader("Slicer Tools")
-        status = sl.slicer_status()
-        st.markdown(
-            f"OpenSCAD: {'✅ found' if status['openscad'] else '❌ not found'}  \n"
-            f"Slicer:   {'✅ ' + (status['slicer_type'] or '') if status['can_slice'] else '❌ not found'}"
-        )
-        if not status["can_compile"]:
-            st.warning("Install OpenSCAD to enable .stl compilation.")
-        if not status["can_slice"]:
-            st.warning("Install PrusaSlicer or CuraEngine to enable G-code generation.")
-
-    # ── Build active_profile (always runs — outside expander) ─────────────────
-    _chosen   = st.session_state.get("printer_choice", (sorted(all_profiles.keys()) + ["Custom"])[0])
-    _adding   = _chosen == "➕ Add New Printer"
-    _prof_raw = all_profiles.get(_chosen, {"bed_x": 235, "bed_y": 235, "bed_z": 250, "notes": ""})
-
-    active_p: dict = {
-        "name":  st.session_state.get("new_printer_name", "Custom") if _adding else _chosen,
-        "bed_x": int(st.session_state.get("bed_x", _prof_raw.get("bed_x", 235))),
-        "bed_y": int(st.session_state.get("bed_y", _prof_raw.get("bed_y", 235))),
-        "bed_z": int(st.session_state.get("bed_z", _prof_raw.get("bed_z", 250))),
-        "notes": st.session_state.get("bed_notes", _prof_raw.get("notes", "")),
-    }
-    if not _adding:
-        for _k in ("hotend_override", "bed_override"):
-            if _k in _prof_raw:
-                active_p[_k] = _prof_raw[_k]
-    st.session_state.active_profile = active_p
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Header
-# ══════════════════════════════════════════════════════════════════════════════
-
-st.markdown(
-    '<div style="display:flex;align-items:center;gap:8px;margin-bottom:2px">'
-    '<span style="font-size:18px;font-weight:800;color:#a8dadc">🖨️ Vibe-to-Print</span>'
-    '<span style="font-size:12px;color:#3a5570;margin-top:2px">Snap · Measure · Print</span>'
-    '</div>',
-    unsafe_allow_html=True,
-)
-
-phase = st.session_state.phase
-
-# Getting Started has its own full-width layout — skip badge/progress
-if phase == "getting_started":
-    gs.render(st.session_state)
-    st.stop()
-
-_wizard_header(phase)
-
-# ══════════════════════════════════════════════════════════════════════════════
-# PHASE A-1 · THE VISION — Upload & Describe
-# ══════════════════════════════════════════════════════════════════════════════
-
-if phase == "vision":
-    # ── Camera — always shown first in all modes ──────────────────────────────
-    _cam_key = f"cam_{st.session_state.camera_counter}"
-    camera_photo = st.camera_input(
-        "📸 Snap a photo — tap to add more",
-        key=_cam_key,
-        label_visibility="visible",
-        help="Each photo snapped is added to the gallery below. Tap again to add another.",
-    )
-
-    # Auto-add newly snapped photo to captured_images list
-    if camera_photo is not None:
-        _cam_bytes = camera_photo.getvalue()
-        _cam_hash  = hashlib.md5(_cam_bytes).hexdigest()
-        if _cam_hash != st.session_state.last_cam_hash:
-            n = len(st.session_state.captured_images) + 1
-            st.session_state.captured_images.append({
-                "bytes":      _cam_bytes,
-                "name":       f"photo_{n}.jpg",
-                "media_type": "image/jpeg",
-            })
-            st.session_state.last_cam_hash  = _cam_hash
-            st.session_state.camera_counter += 1  # reset widget → blank for next snap
-            st.rerun()
-
-    # ── File upload (multiple files supported) ────────────────────────────────
-    with st.expander("📁 Upload image files (multiple OK)"):
-        uploaded_files = st.file_uploader(
-            "Images",
-            type=["png", "jpg", "jpeg", "webp", "gif"],
-            accept_multiple_files=True,
-            label_visibility="collapsed",
-        )
-        if uploaded_files:
-            existing_hashes = {
-                hashlib.md5(ci["bytes"]).hexdigest()
-                for ci in st.session_state.captured_images
-            }
-            added = 0
-            for uf in uploaded_files:
-                ub = uf.getvalue()
-                if hashlib.md5(ub).hexdigest() not in existing_hashes:
-                    ext = Path(uf.name).suffix.lstrip(".").lower()
-                    st.session_state.captured_images.append({
-                        "bytes":      ub,
-                        "name":       uf.name,
-                        "media_type": {
-                            "png": "image/png", "jpg": "image/jpeg",
-                            "jpeg": "image/jpeg", "webp": "image/webp",
-                        }.get(ext, "image/jpeg"),
-                    })
-                    existing_hashes.add(hashlib.md5(ub).hexdigest())
-                    added += 1
-            if added:
-                st.rerun()
-
-    # ── Photo gallery — thumbnails with remove buttons ─────────────────────────
-    imgs = st.session_state.captured_images
-    if imgs:
-        st.markdown(
-            f'<div style="font-size:13px;color:#52b788;font-weight:600;margin:4px 0">'
-            f'📷 {len(imgs)} photo{"s" if len(imgs)>1 else ""} attached'
-            f'{"  ·  📌 first = main for AI" if len(imgs)>1 else ""}'
-            f'</div>',
-            unsafe_allow_html=True,
-        )
-        # 3-up grid
-        n_cols = min(len(imgs), 3)
-        thumb_cols = st.columns(n_cols)
-        to_remove = None
-        for idx, ci in enumerate(imgs):
-            with thumb_cols[idx % n_cols]:
-                st.image(ci["bytes"], use_container_width=True)
-                label = "📌 Main" if idx == 0 else f"#{idx+1}"
-                c1, c2 = st.columns([2, 1])
-                c1.caption(label)
-                if c2.button("✕", key=f"rm_img_{idx}", help="Remove this photo"):
-                    to_remove = idx
-                if idx > 0 and st.button("↑ Make main", key=f"promote_{idx}",
-                                          use_container_width=True):
-                    # Move to front
-                    st.session_state.captured_images.insert(
-                        0, st.session_state.captured_images.pop(idx)
-                    )
-                    st.rerun()
-        if to_remove is not None:
-            st.session_state.captured_images.pop(to_remove)
-            st.rerun()
-
-        if st.button("🗑 Clear all photos", use_container_width=False):
-            st.session_state.captured_images = []
-            st.session_state.last_cam_hash   = ""
-            st.session_state.camera_counter += 1
-            st.rerun()
-
-    st.divider()
-
-    # ── Derive primary image (first in gallery) ───────────────────────────────
-    if st.session_state.captured_images:
-        _primary = st.session_state.captured_images[0]
-        st.session_state.image_bytes      = _primary["bytes"]
-        st.session_state.image_name       = _primary["name"]
-        st.session_state.image_media_type = _primary["media_type"]
-
-    # ── Describe — always visible in all modes ───────────────────────────────
-    vibe = st.text_area(
-        "Describe what you want to make",
-        value=st.session_state.vibe_description,
-        height=90,
-        placeholder="e.g. Broken stove knob — D-shaft 6 mm, chunky grip  "
-                    "or  Wall bracket for 32mm pipe",
-    )
-    st.session_state.vibe_description = vibe
-
-    # ── Scale reference + tips (tucked away) ──────────────────────────────────
-    with st.expander("📐 Scale reference & tips (optional)"):
-        st.markdown(si.tip_card_html(), unsafe_allow_html=True)
-        all_ref_labels = si.all_ui_labels()
-        default_ref_idx = (all_ref_labels.index("Credit / debit card")
-                           if "Credit / debit card" in all_ref_labels else 0)
-        ref_label = st.selectbox(
-            "Reference object in photo",
-            options=all_ref_labels,
-            index=default_ref_idx,
-            key="ref_label_selector",
-        )
-        ref_key = si.key_for_label(ref_label)
-        st.session_state.ref_obj_key = ref_key
-        ref_entry = si.REFERENCE_DB.get(ref_key, {})
-        dims_str  = " · ".join(
-            f"{k}: **{v} mm**" for k, v in ref_entry.get("dims", {}).items()
-        )
-        if dims_str:
-            st.caption(f"Known size → {dims_str}")
-
-    has_image = bool(st.session_state.image_bytes)
-    key_ok    = bool(st.session_state.get("api_key")) or _needs_no_key()
-
-    if _is_manual():
-        # ── Identify button ───────────────────────────────────────────────────
-        if st.button(
-            "🔍 Identify from Photo & Description",
-            type="primary",
-            disabled=not (has_image or vibe.strip()),
-            use_container_width=True,
-        ):
-            with st.spinner("Analysing photo and description…"):
-                _ir = hfi.identify_object(
-                    image_bytes = st.session_state.image_bytes if has_image else None,
-                    description = vibe,
-                    hf_token    = st.session_state.get("api_key", ""),
-                )
-            # Serialize to plain dict for session state storage
-            st.session_state["_identify_result"] = {
-                "caption":        _ir.caption,
-                "object_type":    _ir.object_type,
-                "creation_idea":  _ir.creation_idea,
-                "template_match": _ir.template_match,
-                "alternatives":   _ir.alternatives,
-                "method":         _ir.method,
-                "warning":        _ir.warning,
-            }
-            st.rerun()
-
-        # ── Interactive result card ───────────────────────────────────────────
-        _ir_data: dict | None = st.session_state.get("_identify_result")
-
-        if _ir_data:
-            _caption  = _ir_data.get("caption", "")
-            _idea     = _ir_data.get("creation_idea", "")
-            _best_t   = _ir_data.get("template_match") or {}
-            _alts     = _ir_data.get("alternatives") or []
-            _warning  = _ir_data.get("warning", "")
-
-            if _warning:
-                st.warning(_warning, icon="⚠️")
-
-            # ── What we see ───────────────────────────────────────────────────
-            if _caption:
-                st.markdown(
-                    f'<div style="background:#0a1929;border-left:3px solid #3a78c9;'
-                    f'border-radius:6px;padding:10px 14px;margin-bottom:10px">'
-                    f'<div style="font-size:11px;color:#3a78c9;font-weight:700;'
-                    f'letter-spacing:.05em;text-transform:uppercase">📷 Photo shows</div>'
-                    f'<div style="color:#e0f0ff;font-size:15px;margin-top:4px">'
-                    f'{_caption}</div>'
-                    f'</div>',
-                    unsafe_allow_html=True,
-                )
-
-            # ── Creation idea ─────────────────────────────────────────────────
-            if _idea:
-                st.markdown(
-                    f'<div style="background:#0a1929;border-left:3px solid #52b788;'
-                    f'border-radius:6px;padding:10px 14px;margin-bottom:14px">'
-                    f'<div style="font-size:11px;color:#52b788;font-weight:700;'
-                    f'letter-spacing:.05em;text-transform:uppercase">💡 What to make</div>'
-                    f'<div style="color:#e0f0ff;font-size:15px;margin-top:4px">'
-                    f'{_idea}</div>'
-                    f'</div>',
-                    unsafe_allow_html=True,
-                )
-
-            # ── Best template match ───────────────────────────────────────────
-            if _best_t:
-                st.markdown(
-                    f'<div style="background:#0d2137;border:2px solid #52b788;'
-                    f'border-radius:10px;padding:14px 16px;margin-bottom:8px">'
-                    f'<div style="font-size:11px;color:#52b788;font-weight:700;'
-                    f'letter-spacing:.05em;text-transform:uppercase;margin-bottom:6px">'
-                    f'🖨️ Best match</div>'
-                    f'<div style="font-weight:700;color:#a8dadc;font-size:17px">'
-                    f'{_best_t.get("name","")}</div>'
-                    f'<div style="color:#7a9ab8;font-size:12px;margin:3px 0 8px">'
-                    f'{_best_t.get("category","")}</div>'
-                    f'<div style="color:#cdd8e0;font-size:13px">'
-                    f'{_best_t.get("description","")}</div>'
-                    f'</div>',
-                    unsafe_allow_html=True,
-                )
-
-                if st.button(
-                    f"✓ Yes — make a {_best_t.get('name','')} →",
-                    type="primary",
-                    use_container_width=True,
-                    key="confirm_best_match",
-                ):
-                    _t = tl.get(_best_t["id"])
-                    st.session_state.selected_template_id = _best_t["id"]
-                    st.session_state.required_dims = [
-                        {"id": d["id"], "question": d["question"],
-                         "prefill": str(d["default"])}
-                        for d in _t["dims"]
-                    ]
-                    st.session_state.vibe_description = vibe or _best_t["name"]
-                    st.session_state.object_summary   = (
-                        (f"📷 *{_caption}*\n\n" if _caption else "") +
-                        f"**{_best_t['name']}** — {_best_t['description']}"
-                    )
-                    reset_to("dimensions")
-                    st.rerun()
-
-            else:
-                st.info(
-                    "No template matched yet — try describing it more specifically "
-                    "below, or browse templates manually.",
-                    icon="🔎",
-                )
-
-            # ── Alternatives ──────────────────────────────────────────────────
-            if _alts:
-                st.markdown(
-                    '<div style="font-size:12px;color:#7a9ab8;margin:8px 0 4px">'
-                    'Other possibilities:</div>',
-                    unsafe_allow_html=True,
-                )
-                _alt_cols = st.columns(len(_alts))
-                for _col, _alt in zip(_alt_cols, _alts):
-                    with _col:
-                        st.markdown(
-                            f'<div style="background:#10202e;border:1px solid #1d3557;'
-                            f'border-radius:8px;padding:10px 12px">'
-                            f'<div style="font-weight:600;color:#a8dadc;font-size:14px">'
-                            f'{_alt.get("name","")}</div>'
-                            f'<div style="color:#7a9ab8;font-size:11px;margin-top:3px">'
-                            f'{_alt.get("description","")}</div>'
-                            f'</div>',
-                            unsafe_allow_html=True,
-                        )
-                        if st.button(
-                            "Use this",
-                            key=f"use_alt_{_alt['id']}",
-                            use_container_width=True,
-                        ):
-                            _at = tl.get(_alt["id"])
-                            st.session_state.selected_template_id = _alt["id"]
-                            st.session_state.required_dims = [
-                                {"id": d["id"], "question": d["question"],
-                                 "prefill": str(d["default"])}
-                                for d in _at["dims"]
-                            ]
-                            st.session_state.vibe_description = vibe or _alt["name"]
-                            st.session_state.object_summary   = (
-                                f"**{_alt['name']}** — {_alt['description']}"
-                            )
-                            reset_to("dimensions")
-                            st.rerun()
-
-            # ── Refine description ────────────────────────────────────────────
-            st.markdown(
-                '<div style="font-size:12px;color:#7a9ab8;margin:12px 0 2px">'
-                '🔄 Not right? Add more detail and identify again:</div>',
-                unsafe_allow_html=True,
-            )
-            _refine = st.text_input(
-                "Refine",
-                label_visibility="collapsed",
-                placeholder="e.g. it's a D-shaft knob, 30mm diameter, for a stove",
-                key="refine_description",
-            )
-            if _refine.strip():
-                st.session_state.vibe_description = _refine
-                st.session_state["_identify_result"] = None
-                st.rerun()
-
-            st.divider()
-
-        # ── Smarter AI options (collapsed) ────────────────────────────────────
-        with st.expander("🤖 Get smarter results — connect an AI"):
-            st.markdown("""
-**Free Hugging Face token** *(best first step)*
-Unlocks better photo reading + richer creation suggestions.
-1. Sign up free → [huggingface.co](https://huggingface.co)
-2. Create a token → [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens)
-3. Paste it in **⚙️ Advanced Settings → AI Brain**
-
----
-
-**Local AI — Ollama** *(offline, private, no cost)*
-1. Install [Ollama](https://ollama.ai) on your computer or home server
-2. `ollama pull llava` (vision model)
-3. Select **Local (Ollama)** in ⚙️ Advanced Settings — works over Wi-Fi
-
----
-
-**Any AI app on your phone**
-Share the photo with ChatGPT / Claude / Gemini and ask:
-*"What is this? What measurements do I need to 3D print a replacement in mm?"*
-Then paste the answer into the description above and tap Identify again.
-""")
-
-        # ── Browse templates manually ─────────────────────────────────────────
-        with st.expander("📚 Browse all templates manually"):
-            search_col, cat_col = st.columns([3, 1], gap="medium")
-            with search_col:
-                q = st.text_input("Search", placeholder="knob  /  box  /  bracket  …",
-                                  key="tl_search_query")
-            with cat_col:
-                cats = ["All"] + tl.CATEGORIES
-                cat  = st.selectbox("Category", cats, key="tl_category")
-
-            matches = tl.search(q, cat if cat != "All" else "")
-            if not matches:
-                st.warning("No templates match.")
-            else:
-                st.caption(f"{len(matches)} template{'s' if len(matches) != 1 else ''} found")
-                for row_start in range(0, len(matches), 2):
-                    c1, c2 = st.columns(2, gap="medium")
-                    for col, tmpl in zip((c1, c2), matches[row_start:row_start + 2]):
-                        with col:
-                            selected = st.session_state.selected_template_id == tmpl["id"]
-                            border   = "#52b788" if selected else "#1d3557"
-                            bg       = "rgba(45,106,79,0.15)" if selected else "#10202e"
-                            st.markdown(
-                                f'<div style="background:{bg};border:2px solid {border};'
-                                f'border-radius:10px;padding:12px 14px;margin-bottom:4px">'
-                                f'<div style="font-weight:700;color:#a8dadc;font-size:16px">'
-                                f'{tmpl["name"]}</div>'
-                                f'<div style="color:#7a9ab8;font-size:12px;margin:2px 0 6px">'
-                                f'{tmpl["category"]}</div>'
-                                f'<div style="color:#cdd8e0;font-size:13px">'
-                                f'{tmpl["description"]}</div>'
-                                f'</div>',
-                                unsafe_allow_html=True,
-                            )
-                            btn_lbl = "✓ Selected" if selected else "Use this template"
-                            btn_type = "primary" if selected else "secondary"
-                            if st.button(btn_lbl, key=f"sel_{tmpl['id']}",
-                                         use_container_width=True, type=btn_type):
-                                st.session_state.selected_template_id = tmpl["id"]
-                                t = tl.get(tmpl["id"])
-                                st.session_state.required_dims = [
-                                    {"id": d["id"], "question": d["question"],
-                                     "prefill": str(d["default"])}
-                                    for d in t["dims"]
-                                ]
-                                st.session_state.vibe_description = vibe or t["name"]
-                                st.session_state.object_summary   = t["description"]
-                                reset_to("dimensions")
-                                st.rerun()
-
-    else:
-        # ── AI MODE — Analyse with configured provider ────────────────────────
-        if not key_ok:
-            st.warning("Add an API key in ⚙️ Advanced Settings → AI Brain.", icon="🔑")
-
-        ds_on = st.session_state.get("ds_enabled", False)
-
-        if ds_on:
-            ds_btn = st.button(
-                "🔍 Deep Search — Identify & Look Up Specs",
-                type="primary",
-                disabled=not key_ok or not has_image,
-                use_container_width=True,
-            )
-            if ds_btn:
-                if not vibe.strip():
-                    st.error("Add a description first.")
-                    st.stop()
-                img_b64 = base64.standard_b64encode(st.session_state.image_bytes).decode()
-                with st.spinner("Identifying and searching for specs…"):
-                    try:
-                        result = ds.run_deep_search(
-                            image_b64       = img_b64,
-                            media_type      = st.session_state.image_media_type,
-                            description     = vibe,
-                            brain           = _get_brain(),
-                            gcv_api_key     = st.session_state.get("gcv_api_key", ""),
-                            search_provider = st.session_state.get(
-                                "ds_search_provider", ds.SEARCH_PROVIDER_AI),
-                            search_api_key  = st.session_state.get("ds_search_api_key", ""),
-                        )
-                    except Exception as exc:
-                        st.error(f"Deep Search error: {exc}")
-                        st.stop()
-                st.session_state.ds_result    = result.as_dict()
-                st.session_state.ds_confirmed = False
-                st.session_state.vibe_description = vibe
-                st.session_state.phase = "deep_review"
-                st.rerun()
-
-        if st.button("🔍 Identify & Suggest Measurements",
-                     type="primary" if not ds_on else "secondary",
-                     disabled=not key_ok,
-                     use_container_width=True):
-            if not vibe.strip():
-                st.error("Please describe the object first.")
-                st.stop()
-            img_b64  = (base64.standard_b64encode(st.session_state.image_bytes).decode()
-                        if has_image else None)
-            ref_hint = si.hint_text(st.session_state.get("ref_obj_key", "auto"))
-            with st.spinner("AI is examining the object…"):
-                try:
-                    brain = _get_brain()
-                    summary, dims, scale_meta = brain.extract_dimensions(
-                        img_b64, st.session_state.image_media_type, vibe,
-                        active_p["name"], material, reference_hint=ref_hint,
-                    )
-                except Exception as exc:
-                    st.error(f"AI error: {exc}")
-                    st.stop()
-            if not dims:
-                st.error("AI returned no dimensions. Try rephrasing the description.")
-                st.stop()
-            st.session_state.object_summary = summary
-            st.session_state.required_dims  = dims
-            st.session_state.scale_meta     = scale_meta
-            reset_to("dimensions")
-            st.rerun()
-
-# ══════════════════════════════════════════════════════════════════════════════
-# PHASE A-1.5 · DEEP REVIEW — Show identification + suggested dims for approval
-# ══════════════════════════════════════════════════════════════════════════════
-
-elif phase == "deep_review":
-    dsr = st.session_state.get("ds_result") or {}
-
-    # ── Identity card ─────────────────────────────────────────────────────────
-    conf_color = {"high": "#2d6a4f", "medium": "#7b5800", "low": "#7b2020"}.get(
-        dsr.get("confidence", "low"), "#555"
-    )
-    conf_emoji = {"high": "✅", "medium": "🟡", "low": "⚠️"}.get(
-        dsr.get("confidence", "low"), "❓"
-    )
-
-    st.markdown(f"""
-<div style="background:#0d1b2a;border-left:5px solid {conf_color};
-            border-radius:8px;padding:18px 20px;margin-bottom:16px">
-  <div style="font-size:22px;font-weight:700;color:#e0f0ff;margin-bottom:6px">
-    {conf_emoji} {dsr.get('identified_label', 'Unknown Object')}
-  </div>
-  <div style="color:#a8c8e8;font-size:15px">
-    Manufacturer: <strong>{dsr.get('manufacturer') or '—'}</strong> &nbsp;|&nbsp;
-    Model: <strong>{dsr.get('model_number') or '—'}</strong> &nbsp;|&nbsp;
-    Confidence: <strong>{dsr.get('confidence', 'low').title()}</strong>
-  </div>
-  <div style="margin-top:12px;color:#c8dff0;font-size:16px;font-style:italic">
-    {dsr.get('user_message', '')}
-  </div>
+<div style="
+    display:flex; flex-direction:column; align-items:center;
+    justify-content:center; min-height:80vh; text-align:center;
+    padding: 2rem 1rem;
+">
+  <div style="font-size:64px; margin-bottom:16px">🖨️</div>
+  <h1 style="
+    font-size:clamp(26px,6vw,42px); font-weight:900;
+    color:#a8dadc; margin-bottom:12px; line-height:1.15;
+  ">Vibe-to-Print</h1>
+  <p style="
+    font-size:clamp(15px,3vw,20px); color:#cdd8e0;
+    max-width:520px; line-height:1.6; margin-bottom:32px;
+  ">
+    Snap. Measure. Print.<br>
+    Your AI-powered shortcut from a photo of a broken part
+    to a printable 3D design — no CAD experience needed.
+  </p>
 </div>
 """, unsafe_allow_html=True)
 
-    # ── Suggested dimensions table ────────────────────────────────────────────
-    suggested = dsr.get("suggested_dims", [])
-    if suggested:
-        st.subheader("Suggested Dimensions")
-        st.caption(
-            "These are the factory specs found for this model. "
-            "You can accept them all, edit individual values, or start fresh."
+    # Centre the button with spacer columns
+    _, btn_col, _ = st.columns([1, 2, 1])
+    with btn_col:
+        if st.button("🚀 Get Started", type="primary", use_container_width=True):
+            _go("identify")
+
+    st.stop()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# AI ANALYSIS ENGINE  (embedded — no external module imports)
+# ══════════════════════════════════════════════════════════════════════════════
+
+_BLIP_URL     = "https://api-inference.huggingface.co/models/Salesforce/blip-image-captioning-large"
+_HF_TEXT_URL  = "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.3"
+_BLIP_TIMEOUT = 35
+_HF_TIMEOUT   = 45
+
+
+def _blip_caption(image_bytes: bytes, hf_token: str = "") -> str:
+    """Return a plain-English caption from BLIP. Empty string on failure."""
+    headers = {"Authorization": f"Bearer {hf_token}"} if hf_token else {}
+    try:
+        r = requests.post(_BLIP_URL, headers=headers,
+                          data=image_bytes, timeout=_BLIP_TIMEOUT)
+        if r.ok:
+            data = r.json()
+            if isinstance(data, list) and data:
+                return data[0].get("generated_text", "").strip()
+    except Exception:
+        pass
+    return ""
+
+
+def _hf_chat(prompt: str, hf_token: str = "", max_tokens: int = 512) -> str:
+    """Single-turn HF Inference API chat completion. Returns raw text."""
+    try:
+        from huggingface_hub import InferenceClient
+        client = InferenceClient(token=hf_token or None)
+        resp   = client.chat_completion(
+            model="mistralai/Mistral-7B-Instruct-v0.3",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=max_tokens,
+        )
+        return (resp.choices[0].message.content or "").strip()
+    except Exception:
+        return ""
+
+
+def _ollama_chat(prompt: str, model: str = "llava") -> str:
+    """Single-turn Ollama chat. Returns raw text."""
+    try:
+        r = requests.post(
+            "http://localhost:11434/api/chat",
+            json={"model": model,
+                  "messages": [{"role": "user", "content": prompt}],
+                  "stream": False},
+            timeout=60,
+        )
+        if r.ok:
+            return r.json().get("message", {}).get("content", "").strip()
+    except Exception:
+        pass
+    return ""
+
+
+# ── Keyword fallback: creation idea ──────────────────────────────────────────
+
+_KEYWORD_MAP = [
+    (["knob", "dial", "control", "pot", "rotary", "stove"],
+     "Replacing a missing or broken control knob."),
+    (["hinge", "door", "lid", "flap"],
+     "Replacing a broken hinge or pivot."),
+    (["bracket", "mount", "holder", "clip", "clamp", "shelf"],
+     "Fabricating a custom mounting bracket or holder."),
+    (["gear", "cog", "wheel", "sprocket"],
+     "Replacing a broken gear or drive wheel."),
+    (["hook", "hang", "wall"],
+     "Making a wall-mount hook or hanger."),
+    (["box", "enclosure", "case", "tray", "container"],
+     "Building a custom enclosure or storage box."),
+    (["handle", "grip", "pull", "lever"],
+     "Replacing a handle or grip."),
+    (["cap", "plug", "cover", "stopper", "end cap"],
+     "Making a protective cap or tube plug."),
+    (["spacer", "washer", "shim", "standoff"],
+     "Fabricating a precision spacer or washer."),
+    (["cable", "wire", "cord"],
+     "Making a cable management clip."),
+    (["button", "switch", "key"],
+     "Replacing a push-button or switch cap."),
+    (["drawer", "cabinet", "furniture"],
+     "Replacing a drawer pull or cabinet handle."),
+]
+
+_KEYWORD_TEMPLATE_MAP = [
+    (["knob", "dial", "stove", "d-shaft", "d shaft", "potentiometer", "pot"],
+     "knob_d_shaft"),
+    (["set screw", "round shaft", "round bore"],
+     "knob_round_shaft"),
+    (["pointer", "indicator"],
+     "knob_pointer"),
+    (["box", "tray", "container", "open top", "organiser"],
+     "box_open"),
+    (["lid", "enclosure", "case", "project box"],
+     "box_with_lid"),
+    (["cap", "plug", "tube", "pipe", "end cap", "stopper"],
+     "end_cap"),
+    (["bracket", "l bracket", "angle", "mount", "shelf support"],
+     "l_bracket"),
+    (["cable", "wire", "clip", "snap"],
+     "cable_clip"),
+    (["hook", "wall hook", "hanger", "coat"],
+     "wall_hook"),
+    (["spacer", "washer", "shim", "standoff", "bushing"],
+     "spacer"),
+    (["drawer", "handle", "pull", "cabinet", "furniture"],
+     "drawer_pull"),
+    (["button", "switch cap", "key cap", "push button"],
+     "button_cap"),
+]
+
+
+def _keyword_template(caption: str, description: str) -> str | None:
+    text = f"{caption} {description}".lower()
+    for keywords, tid in _KEYWORD_TEMPLATE_MAP:
+        if any(kw in text for kw in keywords):
+            return tid
+    return None
+
+
+def _keyword_description(caption: str, description: str, template: dict | None) -> str:
+    if template:
+        return f"Replacing or replicating a {template['name'].lower()}. {template['description']}"
+    text = f"{caption} {description}".lower()
+    for keywords, idea in _KEYWORD_MAP:
+        if any(kw in text for kw in keywords):
+            return idea
+    return (f"Creating a custom 3D-printed replacement part based on "
+            f"{'the photo' if caption else 'your description'}.")
+
+
+def _default_dims(template: dict) -> dict[str, str]:
+    return {d["id"]: str(d["default"]) for d in template["dims"]}
+
+
+# ── Master analysis function ──────────────────────────────────────────────────
+
+def analyze_input(
+    image_bytes:  bytes | None,
+    description:  str,
+    hf_token:     str = "",
+    ai_provider:  str = "none",   # "none" | "hf" | "ollama"
+) -> dict:
+    """
+    Full pipeline: BLIP caption → template match → structured result.
+
+    Returns:
+    {
+        "caption":             str,   # BLIP output
+        "project_description": str,   # human-friendly task summary
+        "template_id":         str,   # matched INTERNAL_TEMPLATES id
+        "template_name":       str,
+        "suggested_dims":      {id: str},
+        "method":              str,   # how we got here
+        "warning":             str,   # non-fatal message for UI
+    }
+    """
+    caption = ""
+    warning = ""
+    method  = "keyword"
+
+    # ── Step 1: BLIP caption ─────────────────────────────────────────────────
+    if image_bytes:
+        caption = _blip_caption(image_bytes, hf_token)
+        if not caption:
+            warning = ("Photo AI is warming up or rate-limited — "
+                       "results based on your description.")
+
+    combined = f"{caption} {description}".strip()
+
+    # ── Step 2: Try AI for structured JSON ───────────────────────────────────
+    ai_json: dict | None = None
+
+    if combined and ai_provider in ("hf", "ollama"):
+        tmpl_list = "\n".join(
+            f"  {t['id']}: {t['name']} — {t['description']}"
+            for t in INTERNAL_TEMPLATES
+        )
+        dim_hint = ""
+        # We'll fill dims after template is known; AI can suggest values
+        prompt = (
+            f"You are a 3D printing expert. Analyse this request and respond "
+            f"with ONLY a JSON object — no other text.\n\n"
+            f"Image caption: {caption or '(no image)'}\n"
+            f"User request: {description or '(no description)'}\n\n"
+            f"Available templates:\n{tmpl_list}\n\n"
+            f"Respond with this exact JSON structure:\n"
+            f'{{\n'
+            f'  "project_description": "one or two sentences describing the task",\n'
+            f'  "template_id": "exact id from the list above",\n'
+            f'  "suggested_dims": {{"dim_id": numeric_value, ...}}\n'
+            f'}}'
         )
 
-        conf_badge = {
-            "high":   '<span style="background:#2d6a4f;color:#b7e4c7;'
-                      'padding:2px 8px;border-radius:10px;font-size:13px">high</span>',
-            "medium": '<span style="background:#7b5800;color:#ffe08a;'
-                      'padding:2px 8px;border-radius:10px;font-size:13px">medium</span>',
-            "low":    '<span style="background:#7b2020;color:#ffb3b3;'
-                      'padding:2px 8px;border-radius:10px;font-size:13px">low</span>',
-        }
-
-        # Editable table — one row per dimension
-        st.markdown("---")
-        edited_dims: list[dict] = []
-        for i, dim in enumerate(suggested):
-            c_label, c_val, c_unit, c_conf = st.columns([3, 1.5, 1, 1.2])
-            c_label.markdown(f"**{dim['label']}**")
-            new_val  = c_val.text_input(
-                "Value", value=dim["value"],
-                key=f"dsval_{i}", label_visibility="collapsed"
-            )
-            new_unit = c_unit.text_input(
-                "Unit", value=dim.get("unit", "mm"),
-                key=f"dsunit_{i}", label_visibility="collapsed"
-            )
-            c_conf.markdown(
-                conf_badge.get(dim.get("confidence", "medium"), dim.get("confidence", "")),
-                unsafe_allow_html=True,
-            )
-            if dim.get("source_note"):
-                st.caption(f"   ↳ {dim['source_note']}")
-            edited_dims.append({
-                "id":       dim["id"],
-                "question": dim["label"],
-                "prefill":  f"{new_val} {new_unit}",
-            })
-
-    # ── Sources ───────────────────────────────────────────────────────────────
-    sources = dsr.get("search_sources", [])
-    if sources:
-        with st.expander(f"Sources consulted ({len(sources)})"):
-            for url in sources:
-                if url:
-                    st.markdown(f"- {url}")
-
-    # ── Debug log ─────────────────────────────────────────────────────────────
-    if dsr.get("raw_debug"):
-        with st.expander("Deep Search debug log"):
-            st.code(dsr["raw_debug"])
-
-    # ── Action buttons ────────────────────────────────────────────────────────
-    st.markdown("---")
-    btn_accept, btn_fresh, btn_back = st.columns(3)
-
-    if btn_accept.button("Use These Dimensions →", type="primary"):
-        # Convert suggested dims into the format the dimensions phase expects,
-        # pre-answering each one with the (possibly edited) value from above.
-        if suggested:
-            prefilled_dims   = edited_dims if "edited_dims" in dir() else []
-            pre_answers: dict = {}
-            for d in prefilled_dims:
-                pre_answers[d["id"]] = f"{d['question']} → {d['prefill']}"
-            st.session_state.required_dims = prefilled_dims
-            st.session_state.dim_answers   = pre_answers
-            st.session_state.object_summary = dsr.get("identified_label", "")
-            st.session_state.ds_confirmed  = True
-            st.session_state.phase = "dimensions"
-            st.rerun()
+        if ai_provider == "hf" and hf_token:
+            raw = _hf_chat(prompt, hf_token)
+        elif ai_provider == "ollama":
+            raw = _ollama_chat(prompt)
         else:
-            st.warning("No dimensions were found. Try 'Start Fresh' instead.")
+            raw = ""
 
-    if btn_fresh.button("Start Fresh (manual entry)"):
-        img_b64 = (
-            base64.standard_b64encode(st.session_state.image_bytes).decode()
-            if st.session_state.image_bytes else None
-        )
-        ref_hint = si.hint_text(st.session_state.get("ref_obj_key", "auto"))
-        with st.spinner("AI is analysing the object…"):
+        if raw:
             try:
-                brain = _get_brain()
-                summary, dims, scale_meta = brain.extract_dimensions(
-                    img_b64,
-                    st.session_state.image_media_type,
-                    st.session_state.vibe_description,
-                    active_p["name"],
-                    material,
-                    reference_hint=ref_hint,
-                )
-            except Exception as exc:
-                st.error(f"AI error: {exc}")
-                st.stop()
-        st.session_state.object_summary = summary
-        st.session_state.required_dims  = dims
-        st.session_state.scale_meta     = scale_meta
-        st.session_state.dim_answers    = {}
-        st.session_state.phase = "dimensions"
-        st.rerun()
+                clean = re.sub(r"```(?:json)?\n?", "", raw).strip().rstrip("`")
+                # Extract first {...} block
+                m = re.search(r"\{.*\}", clean, re.DOTALL)
+                if m:
+                    ai_json = json.loads(m.group())
+                    method  = ai_provider
+            except Exception:
+                ai_json = None
 
-    if btn_back.button("← Back"):
-        st.session_state.phase = "vision"
-        st.rerun()
+    # ── Step 3: Build result ──────────────────────────────────────────────────
+    if ai_json:
+        tid      = ai_json.get("template_id", "")
+        template = tmpl_get(tid)
+        if not template:
+            # AI hallucinated an ID — fall back to keyword
+            ai_json = None
+
+    if not ai_json:
+        # Keyword fallback — always succeeds
+        tid  = _keyword_template(caption, description)
+        if not tid:
+            # Broaden: search by combined text
+            matches = tmpl_search(combined)
+            tid     = matches[0]["id"] if matches else INTERNAL_TEMPLATES[0]["id"]
+        template = tmpl_get(tid)
+        method   = "keyword"
+
+    template = template or INTERNAL_TEMPLATES[0]   # absolute fallback
+
+    if ai_json:
+        proj_desc = ai_json.get("project_description", "")
+        raw_dims  = ai_json.get("suggested_dims", {})
+        # Merge AI dims with template defaults (template wins on missing keys)
+        dims = _default_dims(template)
+        for did, val in raw_dims.items():
+            if did in dims:
+                dims[did] = str(val)
+    else:
+        proj_desc = _keyword_description(caption, description, template)
+        dims      = _default_dims(template)
+
+    return {
+        "caption":             caption,
+        "project_description": proj_desc or _keyword_description(caption, description, template),
+        "template_id":         template["id"],
+        "template_name":       template["name"],
+        "suggested_dims":      dims,
+        "method":              method,
+        "warning":             warning,
+    }
+
 
 # ══════════════════════════════════════════════════════════════════════════════
-# PHASE A-2 · DIMENSIONS — User fills in measurements
+# STEP 1 — INPUT  (photo + description → AI analysis)
 # ══════════════════════════════════════════════════════════════════════════════
 
-elif phase == "dimensions":
-    ds_confirmed = st.session_state.get("ds_confirmed", False)
-    dsr          = st.session_state.get("ds_result") or {}
-    dims         = st.session_state.required_dims
+if st.session_state.wizard_step == "identify":
 
-    # ── Initialise dim_values / dim_statuses on first entry ───────────────────
+    # ── Header ────────────────────────────────────────────────────────────────
+    st.markdown(
+        '<h2 style="color:#a8dadc;margin-bottom:4px">📸 Step 1 — Show us the part</h2>'
+        '<p style="color:#7a9ab8;font-size:13px;margin-bottom:16px">'
+        'Snap a photo and describe what you need — the AI does the rest.</p>',
+        unsafe_allow_html=True,
+    )
+
+    # ── Camera ────────────────────────────────────────────────────────────────
+    cam_key   = f"cam_{st.session_state.camera_counter}"
+    cam_photo = st.camera_input("📷 Take a photo of the part", key=cam_key)
+
+    if cam_photo is not None:
+        _bytes = cam_photo.getvalue()
+        _hash  = hashlib.md5(_bytes).hexdigest()
+        if _hash != st.session_state.last_cam_hash:
+            st.session_state.image_bytes      = _bytes
+            st.session_state.image_name       = f"photo_{st.session_state.camera_counter}.jpg"
+            st.session_state.image_media_type = "image/jpeg"
+            st.session_state.last_cam_hash    = _hash
+            st.session_state.camera_counter  += 1
+
+    # Show thumbnail if we have an image
+    if st.session_state.image_bytes:
+        _, thumb_col, _ = st.columns([1, 2, 1])
+        with thumb_col:
+            st.image(st.session_state.image_bytes, caption="📌 Active photo",
+                     use_container_width=True)
+            if st.button("✕ Remove photo", use_container_width=True):
+                st.session_state.image_bytes    = None
+                st.session_state.last_cam_hash  = ""
+                st.session_state.camera_counter += 1
+                st.rerun()
+
+    # ── Description ───────────────────────────────────────────────────────────
+    description = st.text_input(
+        "What do you need?",
+        value=st.session_state.vibe_description,
+        placeholder="e.g., replace knobs that are missing.",
+        label_visibility="visible",
+    )
+    st.session_state.vibe_description = description
+
+    st.divider()
+
+    # ── Analyse button ────────────────────────────────────────────────────────
+    has_input = bool(st.session_state.image_bytes or description.strip())
+
+    if not has_input:
+        st.caption("Add a photo and/or a description to continue.")
+
+    if st.button("🔍 Analyse & Find Best Match",
+                 type="primary",
+                 disabled=not has_input,
+                 use_container_width=True):
+
+        with st.spinner("Reading photo…"):
+            _result = analyze_input(
+                image_bytes  = st.session_state.image_bytes,
+                description  = description,
+                hf_token     = st.session_state.api_key,
+                ai_provider  = st.session_state.ai_provider,
+            )
+
+        st.session_state.identify_result  = _result
+        st.session_state.selected_template = tmpl_get(_result["template_id"])
+        st.session_state.dim_values        = _result["suggested_dims"]
+        _go("results")
+
+    # ── Optional AI settings (collapsed) ─────────────────────────────────────
+    with st.expander("⚙️ AI settings (optional — app works without these)"):
+        _provider = st.selectbox(
+            "AI provider",
+            ["none (keyword matching)", "hf (Hugging Face — free token)",
+             "ollama (local)"],
+            index=["none", "hf", "ollama"].index(
+                st.session_state.ai_provider
+                if st.session_state.ai_provider in ("none", "hf", "ollama")
+                else "none"
+            ),
+            key="_provider_sel",
+        )
+        st.session_state.ai_provider = _provider.split()[0]
+
+        if st.session_state.ai_provider == "hf":
+            _tok = st.text_input(
+                "Hugging Face token",
+                value=st.session_state.api_key,
+                type="password",
+                placeholder="hf_…",
+                help="Free token at huggingface.co/settings/tokens",
+            )
+            st.session_state.api_key = _tok
+        elif st.session_state.ai_provider == "ollama":
+            st.caption("Make sure `ollama serve` is running on localhost:11434 "
+                       "with the `llava` model pulled.")
+
+    st.stop()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SVG SCHEMATIC DIAGRAMS  (one per template, embedded inline)
+# ══════════════════════════════════════════════════════════════════════════════
+
+_SC  = "#1a6fa8"   # part stroke
+_SF  = "#daeeff"   # part fill
+_SD  = "#e63946"   # dimension colour
+_ST  = "#222222"   # general text
+
+_SVG_W, _SVG_H = 320, 200
+
+
+def _svg_wrap(inner: str) -> str:
+    return (
+        '<svg xmlns="http://www.w3.org/2000/svg" '
+        f'viewBox="0 0 {_SVG_W} {_SVG_H}" '
+        'style="width:100%;max-width:420px;border:1px solid #cde;'
+        'border-radius:8px;background:#fafcff">'
+        + inner + "</svg>"
+    )
+
+
+def _hline(x1: float, y: float, x2: float, lbl: str,
+           above: bool = True, col: str = _SD) -> str:
+    tk = 5
+    yo = y - 14 if above else y + 14
+    mx = (x1 + x2) / 2
+    return (
+        f'<line x1="{x1:.1f}" y1="{y:.1f}" x2="{x2:.1f}" y2="{y:.1f}" '
+        f'stroke="{col}" stroke-width="1.2"/>'
+        f'<line x1="{x1:.1f}" y1="{y-tk:.1f}" x2="{x1:.1f}" y2="{y+tk:.1f}" '
+        f'stroke="{col}" stroke-width="1.2"/>'
+        f'<line x1="{x2:.1f}" y1="{y-tk:.1f}" x2="{x2:.1f}" y2="{y+tk:.1f}" '
+        f'stroke="{col}" stroke-width="1.2"/>'
+        f'<text x="{mx:.1f}" y="{yo:.1f}" text-anchor="middle" '
+        f'font-size="10" fill="{col}" font-family="sans-serif">{lbl}</text>'
+    )
+
+
+def _vline(x: float, y1: float, y2: float, lbl: str,
+           right: bool = True, col: str = _SD) -> str:
+    tk = 5
+    xo = x + 16 if right else x - 16
+    my = (y1 + y2) / 2
+    return (
+        f'<line x1="{x:.1f}" y1="{y1:.1f}" x2="{x:.1f}" y2="{y2:.1f}" '
+        f'stroke="{col}" stroke-width="1.2"/>'
+        f'<line x1="{x-tk:.1f}" y1="{y1:.1f}" x2="{x+tk:.1f}" y2="{y1:.1f}" '
+        f'stroke="{col}" stroke-width="1.2"/>'
+        f'<line x1="{x-tk:.1f}" y1="{y2:.1f}" x2="{x+tk:.1f}" y2="{y2:.1f}" '
+        f'stroke="{col}" stroke-width="1.2"/>'
+        f'<text x="{xo:.1f}" y="{my:.1f}" text-anchor="middle" '
+        f'font-size="10" fill="{col}" font-family="sans-serif" '
+        f'transform="rotate(-90 {xo:.1f} {my:.1f})">{lbl}</text>'
+    )
+
+
+def _svg_knob(dv: dict) -> str:
+    kd  = float(dv.get("knob_d", 30))
+    kh  = float(dv.get("knob_h", 22))
+    sd  = float(dv.get("shaft_d", 6.35))
+    sdp = float(dv.get("shaft_depth", 15))
+    sc  = min(140 / max(kd, 1), 120 / max(kh, 1))
+    pw, ph = kd * sc, kh * sc
+    cx, cy = 150, 105
+    bx, by = cx - pw / 2, cy - ph / 2
+    shw = sd * sc
+    shh = min(sdp * sc, ph * 0.65)
+    sx  = cx - shw / 2
+    sy  = by + ph - shh
+    els = [
+        f'<rect x="{bx:.1f}" y="{by:.1f}" width="{pw:.1f}" height="{ph:.1f}" '
+        f'fill="{_SF}" stroke="{_SC}" stroke-width="2.5" rx="6"/>',
+        f'<rect x="{sx:.1f}" y="{sy:.1f}" width="{shw:.1f}" height="{shh:.1f}" '
+        f'fill="#b0cfe8" stroke="{_SC}" stroke-width="1.5"/>',
+        _hline(bx, by - 12, bx + pw, f"{kd:.1f} mm", above=True),
+        _vline(bx + pw + 5, by, by + ph, f"{kh:.1f} mm", right=True),
+        _hline(sx, by + ph + 18, sx + shw, f"⌀{sd:.2f}", above=False),
+    ]
+    return _svg_wrap("".join(els))
+
+
+def _svg_box(dv: dict) -> str:
+    iw   = float(dv.get("inner_w", 80))
+    ih   = float(dv.get("inner_h", 40))
+    wall = float(dv.get("wall", 2.5))
+    sc   = min(180 / max(iw + 2 * wall, 1), 130 / max(ih + wall, 1))
+    ow   = (iw + 2 * wall) * sc
+    oh   = (ih + wall) * sc
+    wsc  = wall * sc
+    cx, cy = 150, 100
+    ox, oy = cx - ow / 2, cy - oh / 2
+    els = [
+        f'<rect x="{ox:.1f}" y="{oy:.1f}" width="{ow:.1f}" height="{oh:.1f}" '
+        f'fill="{_SF}" stroke="{_SC}" stroke-width="2"/>',
+        f'<rect x="{ox+wsc:.1f}" y="{oy+wsc:.1f}" '
+        f'width="{iw*sc:.1f}" height="{ih*sc:.1f}" '
+        f'fill="#f0f8ff" stroke="{_SC}" stroke-width="1" stroke-dasharray="4 2"/>',
+        _hline(ox + wsc, oy - 14, ox + wsc + iw * sc, f"{iw:.0f} mm inner", above=True),
+        _hline(ox, oy + oh + 18, ox + ow, f"{iw + 2*wall:.0f} mm outer", above=False),
+        _vline(ox + ow + 5, oy, oy + oh, f"{ih + wall:.0f} mm", right=True),
+        _vline(ox - 5, oy + wsc, oy + oh, f"{ih:.0f} mm", right=False),
+    ]
+    return _svg_wrap("".join(els))
+
+
+def _svg_end_cap(dv: dict) -> str:
+    pd  = float(dv.get("plug_d", 24))
+    ph  = float(dv.get("plug_h", 15))
+    fd  = float(dv.get("flange_d", 29))
+    fh  = float(dv.get("flange_h", 3))
+    sc  = min(150 / max(fd, 1), 110 / max(ph + fh, 1))
+    pcx = 150
+    by  = 160
+    pw_half = pd / 2 * sc
+    fw_half = fd / 2 * sc
+    phsc    = ph * sc
+    fhsc    = fh * sc
+    els = [
+        f'<rect x="{pcx-fw_half:.1f}" y="{by-fhsc:.1f}" '
+        f'width="{fw_half*2:.1f}" height="{fhsc:.1f}" '
+        f'fill="{_SF}" stroke="{_SC}" stroke-width="2"/>',
+        f'<rect x="{pcx-pw_half:.1f}" y="{by-fhsc-phsc:.1f}" '
+        f'width="{pw_half*2:.1f}" height="{phsc:.1f}" '
+        f'fill="{_SF}" stroke="{_SC}" stroke-width="2"/>',
+        f'<line x1="{pcx:.1f}" y1="{by-fhsc-phsc-5:.1f}" '
+        f'x2="{pcx:.1f}" y2="{by+5:.1f}" '
+        f'stroke="#aaa" stroke-width="1" stroke-dasharray="6 3"/>',
+        _hline(pcx - pw_half, by - fhsc - phsc - 12,
+               pcx + pw_half, f"⌀{pd:.1f} plug", above=True),
+        _hline(pcx - fw_half, by + 16, pcx + fw_half, f"⌀{fd:.1f} flange", above=False),
+        _vline(pcx + fw_half + 5, by - fhsc - phsc, by, f"{ph+fh:.1f} mm", right=True),
+    ]
+    return _svg_wrap("".join(els))
+
+
+def _svg_l_bracket(dv: dict) -> str:
+    a1  = float(dv.get("arm1_len", 50))
+    a2  = float(dv.get("arm2_len", 50))
+    t   = float(dv.get("thickness", 4.5))
+    sc  = min(110 / max(a1, 1), 140 / max(a2, 1))
+    a1s, a2s, ts = a1 * sc, a2 * sc, max(t * sc, 5)
+    ox, oy = 80, 155
+    els = [
+        f'<rect x="{ox:.1f}" y="{oy-a1s:.1f}" width="{ts:.1f}" height="{a1s:.1f}" '
+        f'fill="{_SF}" stroke="{_SC}" stroke-width="2"/>',
+        f'<rect x="{ox:.1f}" y="{oy-ts:.1f}" width="{a2s:.1f}" height="{ts:.1f}" '
+        f'fill="{_SF}" stroke="{_SC}" stroke-width="2"/>',
+        _vline(ox - 5, oy - a1s, oy, f"{a1:.0f} mm", right=False),
+        _hline(ox, oy + 16, ox + a2s, f"{a2:.0f} mm", above=False),
+        f'<text x="{ox+a2s+12:.1f}" y="{oy-ts/2+4:.1f}" font-size="10" '
+        f'fill="{_SD}" font-family="sans-serif">t={t:.1f}</text>',
+    ]
+    return _svg_wrap("".join(els))
+
+
+def _svg_cable_clip(dv: dict) -> str:
+    cd  = float(dv.get("cable_d", 6))
+    wt  = float(dv.get("wall_t", 2.5))
+    bh  = float(dv.get("base_h", 8))
+    r_out = cd / 2 + wt
+    sc  = min(80 / max(r_out * 2, 1), 80 / max(bh + r_out * 2, 1))
+    cx, cy = 150, 100
+    ros = r_out * sc
+    ris = (cd / 2) * sc
+    bhs = bh * sc
+    els = [
+        f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="{ros:.1f}" '
+        f'fill="{_SF}" stroke="{_SC}" stroke-width="2"/>',
+        f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="{ris:.1f}" '
+        f'fill="#f0f8ff" stroke="{_SC}" stroke-width="1.2"/>',
+        f'<rect x="{cx-ros:.1f}" y="{cy+ros:.1f}" '
+        f'width="{ros*2:.1f}" height="{bhs:.1f}" '
+        f'fill="{_SF}" stroke="{_SC}" stroke-width="2"/>',
+        _hline(cx - ris, cy - ros - 12, cx + ris, f"⌀{cd:.1f} cable", above=True),
+        _hline(cx - ros, cy + ros + bhs + 14, cx + ros,
+               f"⌀{r_out*2:.1f} OD", above=False),
+        _vline(cx + ros + 5, cy + ros, cy + ros + bhs, f"{bh:.1f} mm", right=True),
+    ]
+    return _svg_wrap("".join(els))
+
+
+def _svg_wall_hook(dv: dict) -> str:
+    pht = float(dv.get("plate_h", 60))
+    pt  = float(dv.get("plate_t", 5))
+    hr  = float(dv.get("hook_reach", 40))
+    ht  = float(dv.get("hook_t", 6))
+    tip = float(dv.get("tip_h", 20))
+    sc  = min(60 / max(hr + pt, 1), 120 / max(pht, 1))
+    ox, oy = 65, 30
+    ps  = max(pt * sc, 5)
+    hs  = pht * sc
+    hrs = hr * sc
+    hts = max(ht * sc, 5)
+    tips = tip * sc
+    arm_y = oy + hs * 0.4
+    els = [
+        f'<rect x="{ox:.1f}" y="{oy:.1f}" width="{ps:.1f}" height="{hs:.1f}" '
+        f'fill="{_SF}" stroke="{_SC}" stroke-width="2"/>',
+        f'<rect x="{ox:.1f}" y="{arm_y:.1f}" width="{hrs:.1f}" height="{hts:.1f}" '
+        f'fill="{_SF}" stroke="{_SC}" stroke-width="2"/>',
+        f'<rect x="{ox+hrs-hts:.1f}" y="{arm_y-tips:.1f}" '
+        f'width="{hts:.1f}" height="{tips:.1f}" '
+        f'fill="{_SF}" stroke="{_SC}" stroke-width="2"/>',
+        _vline(ox - 5, oy, oy + hs, f"{pht:.0f} mm", right=False),
+        _hline(ox + ps, arm_y + hts + 14, ox + hrs, f"{hr:.0f} mm", above=False),
+        _vline(ox + hrs + 5, arm_y - tips, arm_y, f"{tip:.0f} mm", right=True),
+    ]
+    return _svg_wrap("".join(els))
+
+
+def _svg_spacer(dv: dict) -> str:
+    od  = float(dv.get("outer_d", 20))
+    iid = float(dv.get("inner_d", 5))
+    h   = float(dv.get("height", 5))
+    sc  = min(140 / max(od, 1), 80 / max(h * 4, 1))
+    cx  = 150
+    ty  = 65
+    ods = od * sc
+    ids = iid * sc
+    hs  = h * sc
+    els = [
+        f'<rect x="{cx-ods/2:.1f}" y="{ty:.1f}" width="{ods:.1f}" height="{hs:.1f}" '
+        f'fill="{_SF}" stroke="{_SC}" stroke-width="2"/>',
+        f'<rect x="{cx-ids/2:.1f}" y="{ty-1:.1f}" '
+        f'width="{ids:.1f}" height="{hs+2:.1f}" '
+        f'fill="white" stroke="{_SC}" stroke-width="1.2"/>',
+        f'<line x1="{cx:.1f}" y1="{ty-8:.1f}" x2="{cx:.1f}" y2="{ty+hs+8:.1f}" '
+        f'stroke="#aaa" stroke-width="1" stroke-dasharray="4 2"/>',
+        _hline(cx - ods/2, ty - 14, cx + ods/2, f"⌀{od:.1f} OD", above=True),
+        _hline(cx - ids/2, ty + hs + 16, cx + ids/2, f"⌀{iid:.1f} bore", above=False),
+        _vline(cx + ods/2 + 5, ty, ty + hs, f"{h:.1f} mm", right=True),
+    ]
+    return _svg_wrap("".join(els))
+
+
+def _svg_drawer_pull(dv: dict) -> str:
+    sp  = float(dv.get("span", 96))
+    gl  = float(dv.get("grip_len", 110))
+    gw  = float(dv.get("grip_w", 18))
+    gh  = float(dv.get("grip_h", 25))
+    sc  = min(220 / max(gl, 1), 90 / max(gh + gw, 1))
+    cls = gl * sc
+    sps = sp * sc
+    ghs = gh * sc
+    gws = gw * sc
+    cx  = 160
+    by  = 145
+    off = (gl - sp) / 2 * sc
+    lx  = cx - cls / 2
+    els = [
+        f'<rect x="{lx:.1f}" y="{by-ghs:.1f}" width="{gws:.1f}" height="{ghs:.1f}" '
+        f'fill="{_SF}" stroke="{_SC}" stroke-width="2" rx="3"/>',
+        f'<rect x="{lx+cls-gws:.1f}" y="{by-ghs:.1f}" '
+        f'width="{gws:.1f}" height="{ghs:.1f}" '
+        f'fill="{_SF}" stroke="{_SC}" stroke-width="2" rx="3"/>',
+        f'<rect x="{lx:.1f}" y="{by-ghs-gws*0.4:.1f}" '
+        f'width="{cls:.1f}" height="{gws*0.4:.1f}" '
+        f'fill="{_SF}" stroke="{_SC}" stroke-width="2" rx="4"/>',
+        _hline(lx + off, by + 14, lx + off + sps, f"{sp:.0f} mm span", above=False),
+        _hline(lx, by - ghs - 16, lx + cls, f"{gl:.0f} mm total", above=True),
+        _vline(lx - 5, by - ghs, by, f"{gh:.0f} mm", right=False),
+    ]
+    return _svg_wrap("".join(els))
+
+
+def _svg_button_cap(dv: dict) -> str:
+    cd  = float(dv.get("cap_d", 14))
+    ch  = float(dv.get("cap_h", 7))
+    sh  = float(dv.get("skirt_h", 3))
+    sw  = float(dv.get("stem_w", 4))
+    sdp = float(dv.get("stem_h", 5))
+    sc  = min(140 / max(cd, 1), 100 / max(ch + sh, 1))
+    cds = cd * sc
+    chs = ch * sc
+    shs = sh * sc
+    sws = sw * sc
+    sdps = min(sdp * sc, chs * 0.7)
+    cx  = 150
+    ty  = 45
+    els = [
+        f'<rect x="{cx-cds/2-2:.1f}" y="{ty:.1f}" '
+        f'width="{cds+4:.1f}" height="{shs:.1f}" '
+        f'fill="{_SF}" stroke="{_SC}" stroke-width="2"/>',
+        f'<rect x="{cx-cds/2:.1f}" y="{ty+shs:.1f}" '
+        f'width="{cds:.1f}" height="{chs:.1f}" '
+        f'fill="{_SF}" stroke="{_SC}" stroke-width="2" rx="6"/>',
+        f'<rect x="{cx-sws/2:.1f}" y="{ty+shs:.1f}" '
+        f'width="{sws:.1f}" height="{sdps:.1f}" '
+        f'fill="white" stroke="{_SC}" stroke-width="1.2" stroke-dasharray="3 2"/>',
+        _hline(cx - cds/2, ty + shs + chs + 16, cx + cds/2, f"⌀{cd:.1f} mm", above=False),
+        _vline(cx + cds/2 + 5, ty, ty + shs + chs, f"{ch+sh:.1f} mm", right=True),
+        _hline(cx - sws/2, ty - 12, cx + sws/2, f"{sw:.1f} stem", above=True),
+    ]
+    return _svg_wrap("".join(els))
+
+
+_SVG_DISPATCH: dict = {
+    "knob_d_shaft":     _svg_knob,
+    "knob_round_shaft": _svg_knob,
+    "knob_pointer":     _svg_knob,
+    "box_open":         _svg_box,
+    "box_with_lid":     _svg_box,
+    "end_cap":          _svg_end_cap,
+    "l_bracket":        _svg_l_bracket,
+    "cable_clip":       _svg_cable_clip,
+    "wall_hook":        _svg_wall_hook,
+    "spacer":           _svg_spacer,
+    "drawer_pull":      _svg_drawer_pull,
+    "button_cap":       _svg_button_cap,
+}
+
+
+def part_svg(template_id: str, dim_values: dict) -> str:
+    fn = _SVG_DISPATCH.get(template_id)
+    if fn is None:
+        return _svg_wrap(
+            f'<text x="160" y="100" text-anchor="middle" '
+            f'font-size="14" fill="{_ST}">No diagram available</text>'
+        )
+    return fn(dim_values)
+
+
+# ── Caliper measurement tips per template ─────────────────────────────────────
+
+_CALIPER_TIPS: dict[str, list[str]] = {
+    "knob_d_shaft": [
+        "**Shaft diameter:** Use inside jaws around the shaft.",
+        "**Flat depth:** Measure full shaft diameter, then measure from flat to opposite edge. flat_cut = (diameter/2) − that reading.",
+        "**Shaft depth:** Push depth probe into the bore.",
+        "**Knob diameter:** Outside jaws on the original knob or use a ruler.",
+    ],
+    "knob_round_shaft": [
+        "**Shaft diameter:** Inside jaws around the shaft.",
+        "**Knob diameter:** Outside jaws on widest part of old knob.",
+        "**Set-screw hole:** Usually M3 thread → 2.5 mm drill size.",
+    ],
+    "knob_pointer": [
+        "**Shaft diameter:** Inside jaws on the D-shaft.",
+        "**Knob diameter:** Outside jaws on original knob.",
+        "**Pointer width:** Decide — 2–4 mm is typical.",
+    ],
+    "box_open": [
+        "**Inner width/depth:** Measure the contents that must fit inside.",
+        "**Inner height:** Measure from base to intended top edge.",
+        "**Wall thickness:** 2–3 mm for light objects, 3–5 mm for heavier loads.",
+    ],
+    "box_with_lid": [
+        "**Inner dimensions:** Measure the contents to contain.",
+        "**Lid height:** The rim that overlaps the box — typically 6–10 mm.",
+        "**Press-fit gap:** 0.2 mm = snug, 0.3 mm = standard, 0.4 mm = easy.",
+    ],
+    "end_cap": [
+        "**Plug diameter:** Measure INSIDE the tube with inside jaws.",
+        "**Flange diameter:** Should be slightly larger than tube outer diameter.",
+        "**Plug depth:** Use depth probe inside the tube.",
+    ],
+    "l_bracket": [
+        "**Arm lengths:** Span from corner to mounting hole centre, plus margin.",
+        "**Thickness:** 3–5 mm light loads, 6–8 mm heavy shelves.",
+        "**Hole diameter:** Measure screw shank, not thread diameter.",
+    ],
+    "cable_clip": [
+        "**Cable diameter:** Wrap paper around cable, mark overlap, measure strip ÷ 3.14.",
+        "**Clip width:** How far along cable the clip grips — 15–25 mm typical.",
+        "**Gap %:** 60% = hard snap, 70% = normal, 80% = easy-open.",
+    ],
+    "wall_hook": [
+        "**Plate height:** Measure wall section available for mounting.",
+        "**Hook reach:** Distance from wall to item + 10 mm clearance.",
+        "**Tip height:** Must exceed the item height to prevent it falling off.",
+        "**Screw hole:** Match your wall plugs (4 mm for most standard plugs).",
+    ],
+    "spacer": [
+        "**Outer diameter:** Measure the recess or step that accepts the spacer.",
+        "**Bore diameter:** Measure the bolt or shaft the spacer fits onto.",
+        "**Height:** Use depth probe to measure the gap to fill.",
+    ],
+    "drawer_pull": [
+        "**Span (c-c):** Measure centre-to-centre between the two screw holes.",
+        "**Grip length:** Usually span + 10–20 mm for the end caps.",
+        "**Grip height:** How far the handle stands off the drawer face.",
+    ],
+    "button_cap": [
+        "**Cap diameter:** Measure the recess or housing where the button lives.",
+        "**Stem socket:** Measure button stem — square PCB stems common.",
+        "**Stem depth:** How deep the socket grips for secure clicking.",
+    ],
+}
+
+_CALIPER_TIPS_DEFAULT = [
+    "Use **outside jaws** for external measurements.",
+    "Use **inside jaws** for holes and bores.",
+    "Use the **depth probe** for pocket and slot depths.",
+    "Always measure twice and print a test piece first.",
+]
+
+
+def _caliper_tips_html(template_id: str) -> str:
+    tips = _CALIPER_TIPS.get(template_id, _CALIPER_TIPS_DEFAULT)
+    items = "".join(
+        f"<li style='margin-bottom:6px'>{t}</li>" for t in tips
+    )
+    return (
+        f"<ul style='padding-left:18px;margin:0;font-size:14px'>"
+        f"{items}</ul>"
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STEP 2 — VALIDATE & REFINE  (wizard_step == "results")
+# ══════════════════════════════════════════════════════════════════════════════
+
+if st.session_state.wizard_step == "results":
+
+    res = st.session_state.identify_result
+    if not res:
+        _go("identify")
+
+    tmpl = tmpl_get(res.get("template_id", ""))
+    if not tmpl:
+        tmpl = INTERNAL_TEMPLATES[0]
+
+    # ── AI Interpretation Card ────────────────────────────────────────────────
+    st.markdown("### 🔍 What we found")
+
+    c_info, c_badge = st.columns([2, 1])
+    with c_info:
+        if res.get("caption"):
+            st.markdown(f"**Photo:** {res['caption']}")
+        desc = res.get("project_description") or tmpl["description"]
+        st.markdown(f"**Plan:** {desc}")
+        st.markdown(f"**Template:** {tmpl['name']}")
+        st.caption(f"Method: {res.get('method', 'keyword')}")
+        if res.get("warning"):
+            st.warning(res["warning"])
+    with c_badge:
+        st.markdown(
+            f'<div style="background:#e8f4f8;border-radius:10px;padding:14px;'
+            f'text-align:center;margin-top:4px">'
+            f'<div style="font-size:32px">🖨️</div>'
+            f'<div style="font-weight:700;font-size:13px;margin-top:4px">'
+            f'{tmpl["category"]}</div></div>',
+            unsafe_allow_html=True,
+        )
+
+    st.markdown("---")
+
+    # ── Initialise dim_values from template defaults + AI suggestions ─────────
     if not st.session_state.dim_values:
-        init_vals: dict = {}
-        init_stat: dict = {}
-        for item in dims:
-            qid     = item.get("id", "dim")
-            prefill = item.get("prefill", "")
-            if not prefill:
-                ev   = item.get("estimated_value") or ""
-                eu   = item.get("estimated_unit", "mm")
-                if ev and str(ev).strip() not in ("null", "None", ""):
-                    prefill = f"{ev} {eu}"
-            init_vals[qid] = prefill
-            # In manual/template mode the prefill is a chosen default — treat as
-            # user_entered so the Confirm button is available immediately.
-            if prefill:
-                init_stat[qid] = "user_entered" if _is_manual() else "suggested"
-            else:
-                init_stat[qid] = "empty"
-        st.session_state.dim_values   = init_vals
-        st.session_state.dim_statuses = init_stat
-
-    # ── AI / Template trust card ──────────────────────────────────────────────
-    if ds_confirmed and dsr.get("identified_label"):
-        st.markdown(f"""
-<div style="background:rgba(45,106,79,0.2);border:2px solid #52b788;border-radius:12px;
-            padding:14px 18px;margin-bottom:14px">
-  <div style="font-size:13px;color:#52b788;font-weight:700;margin-bottom:4px">
-    ✅ Deep Search matched
-  </div>
-  <div style="font-size:18px;font-weight:700;color:#e0f0ff">{dsr['identified_label']}</div>
-  <div style="font-size:13px;color:#a8dadc;margin-top:4px">
-    Review the factory specs below and adjust any values before generating your model.
-  </div>
-</div>""", unsafe_allow_html=True)
-
-    elif _is_manual() and st.session_state.object_summary:
-        st.markdown(f"""
-<div style="background:rgba(58,120,201,0.15);border:2px solid #3a78c9;border-radius:12px;
-            padding:14px 18px;margin-bottom:14px">
-  <div style="font-size:13px;color:#3a78c9;font-weight:700;margin-bottom:4px">
-    🛠️ Template selected
-  </div>
-  <div style="font-size:17px;font-weight:700;color:#e0f0ff">{st.session_state.vibe_description}</div>
-  <div style="font-size:13px;color:#a8dadc;margin-top:4px">
-    {st.session_state.object_summary}
-  </div>
-</div>""", unsafe_allow_html=True)
-
-    elif st.session_state.object_summary:
-        st.markdown(f"""
-<div style="background:rgba(123,45,139,0.18);border:2px solid #9b59b6;border-radius:12px;
-            padding:14px 18px;margin-bottom:14px">
-  <div style="font-size:13px;color:#c77dff;font-weight:700;margin-bottom:4px">
-    🤖 AI understood your vibe
-  </div>
-  <div style="font-size:17px;font-weight:700;color:#e0f0ff">{st.session_state.vibe_description or 'Your object'}</div>
-  <div style="font-size:14px;color:#d4b8f0;margin-top:6px;font-style:italic">
-    "{st.session_state.object_summary}"
-  </div>
-  <div style="font-size:12px;color:#8a6aaa;margin-top:6px">
-    Verify or adjust the dimensions below, then click Confirm to generate your 3D model.
-  </div>
-</div>""", unsafe_allow_html=True)
-
-    scale_meta = st.session_state.get("scale_meta") or {}
-    method     = scale_meta.get("scaling_method", "unknown")
-    if method not in ("unknown", "user_provided", ""):
-        mc = {"reference_object":"#2d6a4f","ruler":"#2d6a4f","estimated":"#7b5800"}.get(method,"#555")
-        mi = {"reference_object":"📐","ruler":"📏","estimated":"🔮"}.get(method,"ℹ️")
-        ref_line = f"Reference: **{scale_meta.get('reference_detected','')}**  " if scale_meta.get("reference_detected") else ""
-        st.markdown(f'<div style="background:#0d1b2a;border-left:5px solid {mc};border-radius:8px;'
-                    f'padding:10px 14px;margin-bottom:12px">'
-                    f'{mi} <strong style="color:#e0f0ff">Scale: {method.replace("_"," ").title()}</strong>'
-                    f'<br><span style="color:#a8c8e8;font-size:14px">{ref_line}'
-                    f'{scale_meta.get("scale_note","")}</span></div>', unsafe_allow_html=True)
-
-    # ── Caliper guide expander ─────────────────────────────────────────────────
-    with st.expander("📐 How to measure with calipers — tap to open diagram guide"):
-        st.markdown(cg.full_guide_html(), unsafe_allow_html=True)
-
-    st.divider()
-
-    # ── Smart Suggestions legend ──────────────────────────────────────────────
-    if _is_manual():
-        st.info(
-            "Template defaults are pre-filled below. Measure your part and update "
-            "each value, then click **Confirm Dimensions & Generate OpenSCAD**.",
-            icon="📐",
-        )
-    else:
-        st.markdown("""
-<div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:10px;font-size:13px">
-  <span><span style="display:inline-block;width:12px;height:12px;border-radius:3px;
-    background:rgba(58,120,201,0.4);border:2px solid #4a9eff;margin-right:4px"></span>
-    <strong style="color:#4a9eff">Blue</strong> = AI Suggestion (needs confirmation)</span>
-  <span><span style="display:inline-block;width:12px;height:12px;border-radius:3px;
-    background:rgba(45,106,79,0.4);border:2px solid #52b788;margin-right:4px"></span>
-    <strong style="color:#52b788">Green</strong> = Verified</span>
-  <span><span style="display:inline-block;width:12px;height:12px;border-radius:3px;
-    background:rgba(180,180,180,0.15);border:2px solid #8899aa;margin-right:4px"></span>
-    <strong style="color:#aabbcc">Grey</strong> = Manually entered</span>
-</div>""", unsafe_allow_html=True)
-
-    # ── Per-dimension rows ────────────────────────────────────────────────────
-    statuses  = st.session_state.dim_statuses
-    values    = st.session_state.dim_values
-    any_empty = False
-
-    _STATUS_BORDER = {
-        "suggested":    "#4a9eff",
-        "verified":     "#52b788",
-        "user_entered": "#8899aa",
-        "empty":        "#e94560",
-    }
-    _STATUS_BG = {
-        "suggested":    "rgba(58,120,201,0.15)",
-        "verified":     "rgba(45,106,79,0.20)",
-        "user_entered": "rgba(180,180,180,0.08)",
-        "empty":        "rgba(233,69,96,0.10)",
-    }
-    _STATUS_LABEL = {
-        "suggested":    "AI Suggestion",
-        "verified":     "Verified ✓",
-        "user_entered": "Manually entered",
-        "empty":        "Not filled",
-    }
-
-    for item in dims:
-        qid       = item.get("id", "dim")
-        question  = item.get("question", "")
-        est_conf  = str(item.get("estimation_confidence", "")).lower()
-        est_src   = item.get("estimation_source", "")
-        status    = statuses.get(qid, "empty")
-        cur_val   = values.get(qid, "")
-
-        border = _STATUS_BORDER.get(status, "#555")
-        bg     = _STATUS_BG.get(status, "transparent")
-        slabel = _STATUS_LABEL.get(status, status)
-
-        # Container card for this dimension
-        st.markdown(f"""
-<div style="border:2px solid {border};background:{bg};
-            border-radius:10px;padding:12px 14px;margin-bottom:10px">""",
-            unsafe_allow_html=True)
-
-        # Two-column layout: [input column] [suggestion sidebar]
-        col_input, col_suggest = st.columns([3, 2], gap="medium")
-
-        with col_input:
-            # Status chip
-            st.markdown(
-                f'<span style="font-size:12px;color:{border};font-weight:700">'
-                f'{slabel}</span>',
-                unsafe_allow_html=True,
+        suggested = res.get("suggested_dims", {})
+        st.session_state.dim_values = {}
+        for dim in tmpl["dims"]:
+            raw = suggested.get(dim["id"])
+            st.session_state.dim_values[dim["id"]] = (
+                str(raw) if raw is not None else str(dim["default"])
             )
-            new_val = st.text_input(
-                question,
-                value=cur_val,
-                key=f"dq_{qid}",
-                placeholder="e.g. 12.5 mm",
-            )
-            # Detect if user changed the value
-            if new_val != cur_val:
-                st.session_state.dim_values[qid]   = new_val
-                st.session_state.dim_statuses[qid] = (
-                    "user_entered" if new_val.strip() else "empty"
-                )
-                statuses[qid] = st.session_state.dim_statuses[qid]
 
-        with col_suggest:
-            # Smart Suggestion box (AI mode only)
-            has_estimate = (not _is_manual()) and bool(cur_val) and status in ("suggested", "verified")
-            if has_estimate or (est_src and not _is_manual()):
-                conf_color = {"high":"#52b788","medium":"#ffd700","low":"#e94560",
-                              "estimated (high)":"#52b788","estimated (medium)":"#ffd700",
-                              "estimated (low)":"#e94560"}.get(est_conf,"#aabbcc")
-                st.markdown(f"""
-<div style="background:#0d1b2a;border-radius:8px;padding:8px 10px;
-            border-left:3px solid {conf_color}">
-  <div style="color:#a8dadc;font-size:12px;font-weight:700;margin-bottom:3px">
-    AI Suggests
-  </div>
-  <div style="color:#e0f0ff;font-size:16px;font-weight:700">{cur_val or '—'}</div>
-  <div style="color:#7a9ab8;font-size:11px;margin-top:3px">
-    Confidence: <span style="color:{conf_color}">{est_conf or 'n/a'}</span>
-  </div>
-  {"<div style='color:#6a8aa8;font-size:11px;margin-top:2px;font-style:italic'>" + est_src + "</div>" if est_src else ""}
-</div>""", unsafe_allow_html=True)
+    # ── Measurement diagram ───────────────────────────────────────────────────
+    st.markdown("#### 📐 Measurement diagram")
+    svg_html = part_svg(tmpl["id"], st.session_state.dim_values)
+    st.markdown(
+        f'<div style="text-align:center;margin:8px 0">{svg_html}</div>',
+        unsafe_allow_html=True,
+    )
 
-            # Accept / Clear buttons
-            b1, b2 = st.columns(2)
-            if b1.button("✓ Accept", key=f"acc_{qid}",
-                         help="Mark this value as verified"):
-                if st.session_state.dim_values.get(qid, "").strip():
-                    st.session_state.dim_statuses[qid] = "verified"
-                    st.rerun()
-                else:
-                    st.warning("Enter a value first.")
-            if b2.button("✗ Clear", key=f"clr_{qid}",
-                         help="Clear and re-enter manually"):
-                st.session_state.dim_values[qid]   = ""
-                st.session_state.dim_statuses[qid] = "empty"
-                st.rerun()
+    # ── Confirmation buttons ──────────────────────────────────────────────────
+    st.markdown("**Does this look right?**")
+    btn_yes, btn_no = st.columns(2)
+    with btn_yes:
+        if st.button("✅ Yes — looks good!", use_container_width=True, type="primary"):
+            st.session_state.selected_template = tmpl
+            _go("dimensions")
+    with btn_no:
+        if st.button("✏️ No — let me adjust", use_container_width=True):
+            st.session_state.show_refinement = True
+            st.rerun()
 
-        st.markdown("</div>", unsafe_allow_html=True)
+    # ── Refinement panel ─────────────────────────────────────────────────────
+    if st.session_state.show_refinement:
 
-        if not st.session_state.dim_values.get(qid, "").strip():
-            any_empty = True
+        st.markdown("---")
+        st.markdown("#### ✏️ Adjust measurements")
 
-    # ── Accept All shortcut (AI mode only) ───────────────────────────────────
-    st.divider()
-    accept_all_col, _ = st.columns([1, 2])
-    if not _is_manual() and accept_all_col.button(
-            "✓ Accept All AI Suggestions", use_container_width=True,
-            help="Mark every pre-filled value as verified at once"):
-        for item in dims:
-            qid = item.get("id", "dim")
-            if st.session_state.dim_values.get(qid, "").strip():
-                st.session_state.dim_statuses[qid] = "verified"
-        st.rerun()
-
-    # ── Confirmation progress & button ────────────────────────────────────────
-    n_total    = len(dims)
-    n_ready    = sum(1 for item in dims
-                     if st.session_state.dim_statuses.get(item.get("id",""), "empty")
-                     in ("verified", "user_entered")
-                     and st.session_state.dim_values.get(item.get("id",""), "").strip())
-    all_ready  = (n_ready == n_total) and n_total > 0
-
-    st.markdown(f"""
-<div style="background:#0d1b2a;border-radius:8px;padding:10px 16px;
-            margin:10px 0;display:flex;align-items:center;gap:12px">
-  <div style="flex:1">
-    <div style="color:#a8dadc;font-weight:700;font-size:14px">
-      Confirmation progress
-    </div>
-    <div style="background:#1d3557;border-radius:4px;height:8px;margin-top:6px">
-      <div style="background:{'#52b788' if all_ready else '#3a78c9'};
-                  border-radius:4px;height:8px;
-                  width:{int(n_ready/max(n_total,1)*100)}%"></div>
-    </div>
-  </div>
-  <div style="color:#e0f0ff;font-size:20px;font-weight:700;white-space:nowrap">
-    {n_ready}/{n_total}
-  </div>
-</div>""", unsafe_allow_html=True)
-
-    conf_col, back_col = st.columns([2, 1])
-
-    if conf_col.button(
-        "Confirm Dimensions & Generate OpenSCAD →",
-        type="primary",
-        disabled=not all_ready,
-        use_container_width=True,
-        help="All dimensions must be verified or manually entered before generating.",
-    ):
-        # Compile dim_answers from confirmed values
-        compiled: dict = {}
-        for item in dims:
-            qid = item.get("id", "dim")
-            q   = item.get("question", "")
-            v   = st.session_state.dim_values.get(qid, "")
-            compiled[qid] = f"{q} → {v}"
-        st.session_state.dim_answers  = compiled
-        st.session_state.dims_confirmed = True
-        reset_to("cad")
-        st.rerun()
-
-    if back_col.button(
-        "← Back to Deep Search" if ds_confirmed else "← Back",
-        use_container_width=True,
-    ):
-        st.session_state.phase = "deep_review" if ds_confirmed else "vision"
-        st.rerun()
-
-    # ── Live SCAD preview (template mode — instant, no API call) ─────────────
-    if _is_manual():
-        _tmpl_live = tl.get(st.session_state.get("selected_template_id"))
-        if _tmpl_live:
-            _cx, _cy = pp.bed_center(_active_profile())
-            _live_code = tl.generate_scad(
-                _tmpl_live, st.session_state.dim_values, _cx, _cy
-            )
-            with st.expander("📄 Live OpenSCAD Preview (updates as you type)", expanded=False):
-                st.code(_live_code, language="openscad")
-                st.caption(
-                    "This is exactly the code that will be used when you click "
-                    "**Confirm Dimensions & Generate OpenSCAD**."
-                )
-
-    # ── Ask AI to update estimates (AI mode only) ─────────────────────────────
-    if not _is_manual():
-        st.divider()
-        with st.expander("🤖 Something changed? Ask the AI to update estimates"):
-            st.caption(
-                "Describe what changed — a different size, a new feature, a correction. "
-                "The AI will revise only the affected dimensions and preserve the rest."
-            )
-            change_req = st.text_area(
-                "What changed?",
-                height=90,
-                placeholder="e.g. The shaft is actually 8 mm, not 6 mm. "
-                            "Also add a recess for an M3 nut on the back.",
-                key="change_request_text",
-            )
-            key_ok2 = bool(st.session_state.get("api_key")) or _needs_no_key()
-
-            if st.button("Re-ask AI for updated estimates", disabled=not key_ok2,
-                         use_container_width=True):
-                if not change_req.strip():
-                    st.warning("Describe the change first.")
-                    st.stop()
-                img_b64 = (
-                    base64.standard_b64encode(st.session_state.image_bytes).decode()
-                    if st.session_state.image_bytes else None
-                )
-                with st.spinner("AI is updating estimates…"):
-                    try:
-                        brain = _get_brain()
-                        _, new_dims, new_meta = brain.refine_dimensions(
-                            original_dims   = dims,
-                            current_values  = st.session_state.dim_values,
-                            change_request  = change_req,
-                            image_b64       = img_b64,
-                            media_type      = st.session_state.image_media_type,
-                        )
-                    except Exception as exc:
-                        st.error(f"AI error: {exc}")
-                        st.stop()
-
-                for nd in new_dims:
-                    nid      = nd.get("id", "")
-                    new_est  = nd.get("estimated_value", "")
-                    new_unit = nd.get("estimated_unit", "mm")
-                    old_val  = st.session_state.dim_values.get(nid, "")
-                    new_val  = (f"{new_est} {new_unit}"
-                                if new_est and str(new_est) not in ("null", "None", "")
-                                else old_val)
-                    if new_val != old_val:
-                        st.session_state.dim_values[nid]   = new_val
-                        st.session_state.dim_statuses[nid] = "suggested"
-                existing_ids = {d.get("id") for d in st.session_state.required_dims}
-                for nd in new_dims:
-                    if nd.get("id") not in existing_ids:
-                        st.session_state.required_dims.append(nd)
-                        st.session_state.dim_values[nd.get("id", "")] = ""
-                        st.session_state.dim_statuses[nd.get("id", "")] = "empty"
-                st.session_state.scale_meta = new_meta
-                st.success("Estimates updated. Review the changes above.")
-                st.rerun()
-
-# ══════════════════════════════════════════════════════════════════════════════
-# PHASE B · CAD — Generate & display OpenSCAD
-# ══════════════════════════════════════════════════════════════════════════════
-
-elif phase == "cad":
-    st.subheader("Step 3 · Your 3D Design")
-
-    profile  = _active_profile()
-    centering = pp.centering_instruction(profile)
-
-    if not st.session_state.openscad_code:
-        if _is_manual():
-            # Template mode — instant deterministic generation, no AI call
-            tmpl_id = st.session_state.get("selected_template_id")
-            tmpl    = tl.get(tmpl_id) if tmpl_id else None
-            if tmpl is None:
-                st.error("No template selected. Go back and choose a template.")
-                if st.button("← Back to Templates"):
-                    reset_to("vision")
-                    st.rerun()
-                st.stop()
-            cx, cy = pp.bed_center(profile)
-            code   = tl.generate_scad(
-                tmpl,
-                st.session_state.dim_values,
-                cx, cy,
-            )
-            notes  = (
-                f"Generated from template: **{tmpl['name']}** ({tmpl['category']})\n\n"
-                f"{tmpl['description']}"
-            )
-        else:
-            with st.spinner("Master Mechanical Modeler is designing your part…"):
-                try:
-                    brain = _get_brain()
-                    code, notes = brain.generate_openscad(
-                        st.session_state.vibe_description,
-                        st.session_state.dim_answers,
-                        profile,
-                        material,
-                        MATERIAL_TEMPS,
-                        centering,
+        dims = tmpl["dims"]
+        updated_dims: dict[str, str] = {}
+        pairs = [dims[i: i + 2] for i in range(0, len(dims), 2)]
+        for pair in pairs:
+            cols = st.columns(len(pair))
+            for col, dim in zip(cols, pair):
+                with col:
+                    current = float(
+                        st.session_state.dim_values.get(dim["id"], dim["default"])
                     )
-                except Exception as exc:
-                    st.error(f"AI error: {exc}")
-                    st.stop()
+                    val = st.number_input(
+                        dim["question"],
+                        value=current,
+                        step=0.5 if dim["unit"] == "mm" else 1.0,
+                        format="%.1f" if dim["unit"] in ("mm", "") else "%.0f",
+                        key=f"dim_{dim['id']}",
+                    )
+                    updated_dims[dim["id"]] = str(val)
 
-        # Store fingerprint so we can detect if dims change later
-        _fp = hashlib.md5(str(st.session_state.dim_values).encode()).hexdigest()[:10]
-        st.session_state.scad_dims_fp   = _fp
-        st.session_state.openscad_code  = code
-        st.session_state.openscad_notes = notes
-
-    code  = st.session_state.openscad_code
-    notes = st.session_state.openscad_notes
-
-    # ── Stale-dims banner ─────────────────────────────────────────────────────
-    _current_fp = hashlib.md5(str(st.session_state.dim_values).encode()).hexdigest()[:10]
-    _stored_fp  = st.session_state.get("scad_dims_fp", "")
-    _dims_stale = bool(_stored_fp and _current_fp != _stored_fp)
-    if _dims_stale:
-        st.warning(
-            "Your measurements changed since this code was generated. "
-            "Click **↺ Regenerate** to update the design.",
-            icon="🔄",
+        # Live-updating diagram
+        st.markdown("**Live preview:**")
+        live_svg = part_svg(tmpl["id"], updated_dims)
+        st.markdown(
+            f'<div style="text-align:center;margin:8px 0">{live_svg}</div>',
+            unsafe_allow_html=True,
         )
-    else:
-        st.success("OpenSCAD code generated!")
 
-    col_dl, col_slice, col_regen, col_back = st.columns(4)
-
-    col_dl.download_button(
-        "⬇ Download .scad",
-        data=code,
-        file_name="vibe_model.scad",
-        mime="text/plain",
-    )
-
-    if col_slice.button("Compile & Slice →", type="primary"):
-        reset_to("slicer")
-        st.rerun()
-
-    if col_regen.button("↺ Regenerate", type="primary" if _dims_stale else "secondary"):
-        st.session_state.openscad_code = ""
-        st.session_state.scad_dims_fp  = ""
-        st.rerun()
-
-    if col_back.button("← Back"):
-        reset_to("dimensions")
-        st.rerun()
-
-    st.divider()
-
-    # ── Code view + browser preview ───────────────────────────────────────────
-    with st.expander("📄 View OpenSCAD Code", expanded=False):
-        st.code(code, language="openscad")
-
-    if notes:
-        with st.expander("🧠 Design decisions", expanded=False):
-            st.markdown(notes)
-
-    # ── Zero-install preview option ────────────────────────────────────────────
-    status_cad = sl.slicer_status()
-    if not status_cad["can_compile"]:
-        st.info(
-            "**OpenSCAD not installed locally** — you can still preview and compile "
-            "your model in the browser for free.",
-            icon="🌐",
-        )
-    with st.expander("🌐 Preview in Browser (No Install Required)", expanded=not status_cad["can_compile"]):
-        st.markdown("""
-**Option A — openscad.cloud** (recommended)
-1. Click **"⬇ Download .scad"** above to save the file
-2. Open **[openscad.cloud](https://openscad.cloud)** in a new tab
-3. Click **Open** → select your `.scad` file → click ▶ **Render**
-4. Export the resulting STL and come back here to slice it
-
-**Option B — OpenSCAD Web (official)**
-1. Download the `.scad` file above
-2. Open **[ochafik.com/openscad2](https://ochafik.com/openscad2/)** in a new tab
-3. Open your file and render
-
-Once you have an STL file, use the upload option in the Slicer step, or slice it
-online with **[kiri.moto](https://kiri.moto)**.
-""")
-        st.caption("These free browser tools compile OpenSCAD to STL without installing anything.")
-
-# ══════════════════════════════════════════════════════════════════════════════
-# PHASE C · SLICER — Compile .scad → .stl → .gcode
-# ══════════════════════════════════════════════════════════════════════════════
-
-elif phase == "slicer":
-    st.subheader("Step 4 · Compile & Slice")
-    profile = _active_profile()
-    status  = sl.slicer_status()
-
-    # ── Step 1: .scad → .stl ─────────────────────────────────────────────────
-    if st.session_state.stl_path is None:
-        if not status["can_compile"]:
-            # No local OpenSCAD — show browser alternative prominently
-            st.warning("OpenSCAD is not installed on this machine.", icon="⚠️")
-            st.markdown("""
-<div style="background:#1d3557;border-radius:10px;padding:16px 18px;margin:8px 0">
-<div style="font-size:16px;font-weight:700;color:#a8dadc;margin-bottom:8px">
-🌐 Compile in your browser — free, no install needed
-</div>
-<ol style="color:#cdd8e0;font-size:15px;margin:0;padding-left:20px;line-height:2">
-  <li>Go back to Step 3 and click <strong>⬇ Download .scad</strong></li>
-  <li>Open <a href="https://openscad.cloud" target="_blank" style="color:#4a9eff">openscad.cloud</a>
-      in a new tab</li>
-  <li>Click <strong>Open</strong>, select your file, then click ▶ <strong>Render</strong></li>
-  <li>Export the STL — then come back and upload it below</li>
-</ol>
-</div>""", unsafe_allow_html=True)
-            st.divider()
-            st.markdown("**Or upload a pre-compiled STL:**")
-            ext_stl = st.file_uploader("Upload STL file", type=["stl"], key="ext_stl_upload")
-            if ext_stl:
-                stl_dest = _work_dir() / "uploaded_model.stl"
-                stl_dest.write_bytes(ext_stl.getvalue())
-                st.session_state.stl_path = str(stl_dest)
-                st.success("STL loaded — ready to slice!")
-                st.rerun()
-            if st.button("← Back to Design"):
-                reset_to("cad")
-                st.rerun()
-            st.stop()
-
-        with st.spinner("OpenSCAD is compiling your model to STL…"):
-            ok, log, stl_p = sl.compile_to_stl(
-                st.session_state.openscad_code,
-                output_dir=_work_dir(),
+        # Caliper guide
+        with st.expander("📏 How to measure — Caliper guide"):
+            st.markdown(_caliper_tips_html(tmpl["id"]), unsafe_allow_html=True)
+            st.markdown(
+                "**No caliper?** A ruler works for external dims; "
+                "wrap paper around cylinders to measure diameter."
             )
-        st.session_state.slicer_log += f"=== OpenSCAD ===\n{log}\n\n"
 
-        if not ok:
-            st.error("OpenSCAD compilation failed.")
-            with st.expander("Compiler log"):
-                st.code(log)
-            if st.button("← Back to Design"):
-                reset_to("cad")
-                st.rerun()
-            st.stop()
+        # Re-analyse
+        st.markdown("---")
+        re_desc = st.text_area(
+            "Refine your description and re-analyse:",
+            value=st.session_state.vibe_description,
+            key="re_analyse_desc",
+            height=80,
+        )
+        if st.button("🔍 Re-analyse with updated description"):
+            st.session_state.vibe_description = re_desc
+            with st.spinner("Re-analysing…"):
+                st.session_state.identify_result = analyze_input(
+                    st.session_state.image_bytes,
+                    re_desc,
+                    hf_token=st.session_state.api_key,
+                    ai_provider=st.session_state.ai_provider,
+                )
+            st.session_state.dim_values = {}
+            st.session_state.show_refinement = False
+            st.rerun()
 
-        st.session_state.stl_path = str(stl_p)
+        st.markdown("---")
+        if st.button("✅ Finalize Measurements",
+                     use_container_width=True, type="primary"):
+            st.session_state.dim_values = updated_dims
+            st.session_state.selected_template = tmpl
+            st.session_state.show_refinement = False
+            _go("dimensions")
 
-    stl_path = Path(st.session_state.stl_path)
+    st.stop()
 
-    # ── 3D Preview ─────────────────────────────────────────────────────────────
-    st.success("✅ 3D model ready!")
-    with st.expander("🎯 3D Preview — rotate · zoom · pan", expanded=True):
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STEP 3 — FINALIZE & EXPORT  (wizard_step == "dimensions")
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── Tool-detection helpers ────────────────────────────────────────────────────
+
+def _find_openscad() -> str | None:
+    """Return path to OpenSCAD executable, or None if not found."""
+    if p := shutil.which("openscad"):
+        return p
+    candidates = [
+        r"C:\Program Files\OpenSCAD\openscad.exe",
+        r"C:\Program Files (x86)\OpenSCAD\openscad.exe",
+        "/Applications/OpenSCAD.app/Contents/MacOS/OpenSCAD",
+        "/usr/bin/openscad",
+        "/usr/local/bin/openscad",
+    ]
+    for c in candidates:
+        if Path(c).exists():
+            return c
+    return None
+
+
+def _find_slicer() -> tuple[str, str] | None:
+    """Return (slicer_name, path) for PrusaSlicer or Cura, or None."""
+    prusa_candidates = [
+        shutil.which("prusa-slicer-console"),
+        shutil.which("prusa-slicer"),
+        shutil.which("PrusaSlicer"),
+        r"C:\Program Files\Prusa3D\PrusaSlicer\prusa-slicer-console.exe",
+        r"C:\Program Files\PrusaSlicer\prusa-slicer-console.exe",
+        "/Applications/PrusaSlicer.app/Contents/MacOS/PrusaSlicer",
+        "/usr/bin/prusa-slicer",
+    ]
+    for p in prusa_candidates:
+        if p and Path(p).exists():
+            return ("PrusaSlicer", p)
+    cura_candidates = [
+        shutil.which("CuraEngine"),
+        r"C:\Program Files\Ultimaker Cura\CuraEngine.exe",
+        r"C:\Program Files\UltiMaker Cura\CuraEngine.exe",
+        "/usr/bin/CuraEngine",
+    ]
+    for p in cura_candidates:
+        if p and Path(p).exists():
+            return ("CuraEngine", p)
+    return None
+
+
+# ── Compile / slice helpers ───────────────────────────────────────────────────
+
+def _compile_stl(scad_code: str, openscad_path: str) -> tuple[bytes | None, str]:
+    """
+    Run OpenSCAD in headless mode to produce an STL.
+    Returns (stl_bytes, error_message).  error_message is '' on success.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        scad_file = Path(td) / "part.scad"
+        stl_file  = Path(td) / "part.stl"
+        scad_file.write_text(scad_code, encoding="utf-8")
         try:
-            stl_bytes_preview = stl_path.read_bytes()
-            components.html(v3d.stl_viewer_html(stl_bytes_preview), height=400, scrolling=False)
-        except Exception as _ve:
-            st.caption(f"Preview unavailable: {_ve}")
-
-    col_stl_dl, col_back_cad = st.columns(2)
-    col_stl_dl.download_button(
-        "⬇ Download STL",
-        data=stl_path.read_bytes(),
-        file_name=stl_path.name,
-        mime="application/octet-stream",
-        use_container_width=True,
-    )
-    if col_back_cad.button("← Back to Design", use_container_width=True):
-        reset_to("cad")
-        st.rerun()
-
-    st.divider()
-
-    # ── Step 2: .stl → .gcode ────────────────────────────────────────────────
-    import basic_slicer as bs
-
-    if st.session_state.gcode_path is None:
-        if status["can_slice"]:
-            # ── Local PrusaSlicer / CuraEngine ────────────────────────────────
-            with st.spinner(f"Slicing with {status['slicer_type']}…"):
-                ok, log, gcode_p = sl.slice_stl(
-                    stl_path, profile, material, MATERIAL_TEMPS, _work_dir()
-                )
-            st.session_state.slicer_log += f"=== {status['slicer_type']} ===\n{log}\n\n"
-
-            if not ok:
-                st.error("Slicing failed.")
-                with st.expander("Slicer log"):
-                    st.code(log)
-                st.download_button(
-                    "⬇ Download STL (slice manually)",
-                    data=stl_path.read_bytes(),
-                    file_name=stl_path.name,
-                    mime="application/octet-stream",
-                )
-            else:
-                sl.prepend_start_gcode(gcode_p, profile, material, MATERIAL_TEMPS)
-                st.session_state.gcode_path = str(gcode_p)
-                st.success("✅ G-code ready!")
-
-        elif bs.available():
-            # ── Built-in Python slicer (zero install) ─────────────────────────
-            st.info(
-                "No local slicer found — using the **built-in Python slicer** "
-                "(perimeters + rectilinear infill). "
-                "Install PrusaSlicer for production-quality G-code.",
-                icon="🐍",
+            result = subprocess.run(
+                [openscad_path, "-o", str(stl_file), str(scad_file)],
+                capture_output=True, text=True, timeout=120,
             )
-            with st.spinner("Slicing with built-in Python slicer…"):
-                ok, log, gcode_p = bs.slice_stl(
-                    stl_path, profile, material, MATERIAL_TEMPS, _work_dir()
-                )
-            st.session_state.slicer_log += f"=== Built-in Slicer ===\n{log}\n\n"
+            if stl_file.exists() and stl_file.stat().st_size > 0:
+                return stl_file.read_bytes(), ""
+            stderr = (result.stderr or "").strip()
+            return None, stderr or "OpenSCAD produced no output — check your parameters."
+        except subprocess.TimeoutExpired:
+            return None, "OpenSCAD timed out (>120 s). Simplify the model or lower $fn."
+        except FileNotFoundError:
+            return None, f"OpenSCAD not found at: {openscad_path}"
+        except Exception as exc:
+            return None, str(exc)
 
-            if not ok:
-                st.error(f"Built-in slicer failed: {log}")
-            else:
-                st.session_state.gcode_path = str(gcode_p)
-                st.success("✅ G-code ready! (built-in slicer)")
 
-        else:
-            # ── Fallback: manual browser workflow ─────────────────────────────
-            st.warning("No slicer available. Install numpy-stl and shapely, "
-                       "or use an external slicer.", icon="⚠️")
-            st.markdown("""
-Download your STL above, then slice it online at
-**[kiri.moto](https://kiri.moto)** or **[PrusaSlicer Web](https://slicer.prusa3d.com)**.
-""")
-            st.caption("Install PrusaSlicer locally for fully automatic in-app slicing.")
+def _slice_stl(stl_bytes: bytes, slicer_name: str,
+               slicer_path: str) -> tuple[bytes | None, str]:
+    """
+    Slice an STL with PrusaSlicer CLI.
+    Returns (gcode_bytes, error_message).
+    """
+    if slicer_name != "PrusaSlicer":
+        return None, (
+            f"{slicer_name} CLI slicing is not yet supported here. "
+            "Open the STL in your slicer manually."
+        )
+    with tempfile.TemporaryDirectory() as td:
+        stl_file   = Path(td) / "part.stl"
+        gcode_file = Path(td) / "part.gcode"
+        stl_file.write_bytes(stl_bytes)
+        try:
+            result = subprocess.run(
+                [slicer_path, "--export-gcode",
+                 "--output", str(gcode_file), str(stl_file)],
+                capture_output=True, text=True, timeout=300,
+            )
+            if gcode_file.exists() and gcode_file.stat().st_size > 0:
+                return gcode_file.read_bytes(), ""
+            stderr = (result.stderr or "").strip()
+            return None, stderr or "PrusaSlicer produced no G-code output."
+        except subprocess.TimeoutExpired:
+            return None, "PrusaSlicer timed out. Try slicing manually."
+        except Exception as exc:
+            return None, str(exc)
 
-    if st.session_state.gcode_path:
-        gcode_path = Path(st.session_state.gcode_path)
 
-        col_dl, col_next, _ = st.columns(3)
-        col_dl.download_button(
-            "⬇ Download G-code",
-            data=gcode_path.read_bytes(),
-            file_name=gcode_path.name,
+# ── Project save / load ───────────────────────────────────────────────────────
+
+def _project_to_json() -> str:
+    """Serialise current project to a JSON string."""
+    img_b64 = ""
+    if st.session_state.image_bytes:
+        img_b64 = base64.b64encode(st.session_state.image_bytes).decode()
+    tmpl = st.session_state.selected_template or {}
+    res  = st.session_state.identify_result  or {}
+    return json.dumps({
+        "vtp_version":         "1.0",
+        "saved_at":            time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "template_id":         tmpl.get("id", ""),
+        "vibe_description":    st.session_state.vibe_description,
+        "project_description": res.get("project_description", ""),
+        "dim_values":          st.session_state.dim_values,
+        "image_b64":           img_b64,
+        "image_media_type":    st.session_state.image_media_type,
+    }, indent=2)
+
+
+def _load_project_json(raw: bytes) -> str:
+    """
+    Populate st.session_state from a .vtp.json file.
+    Returns an error string, or '' on success.
+    """
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return "File is not valid JSON."
+    if data.get("vtp_version") != "1.0":
+        return "Unrecognised project format (expected vtp_version 1.0)."
+    tid  = data.get("template_id", "")
+    tmpl = tmpl_get(tid)
+    if not tmpl:
+        return f"Template '{tid}' not found in this version of the app."
+
+    st.session_state.selected_template  = tmpl
+    st.session_state.vibe_description   = data.get("vibe_description", "")
+    st.session_state.dim_values         = data.get("dim_values", {})
+    st.session_state.image_media_type   = data.get("image_media_type", "image/jpeg")
+    img_b64 = data.get("image_b64", "")
+    if img_b64:
+        try:
+            st.session_state.image_bytes = base64.b64decode(img_b64)
+        except Exception:
+            st.session_state.image_bytes = None
+    else:
+        st.session_state.image_bytes = None
+
+    # Reconstruct a minimal identify_result so Step 2 can display context
+    st.session_state.identify_result = {
+        "project_description": data.get("project_description", ""),
+        "template_id":         tid,
+        "template_name":       tmpl["name"],
+        "suggested_dims":      data.get("dim_values", {}),
+        "method":              "loaded from file",
+        "warning":             "",
+        "caption":             "",
+    }
+    st.session_state.show_refinement = False
+    return ""
+
+
+# ── Wizard Step 3 ─────────────────────────────────────────────────────────────
+
+if st.session_state.wizard_step == "dimensions":
+
+    tmpl = st.session_state.selected_template
+    if not tmpl:
+        _go("identify")
+
+    dim_values = st.session_state.dim_values or {
+        d["id"]: str(d["default"]) for d in tmpl["dims"]
+    }
+
+    scad_code = tmpl_generate_scad(tmpl, dim_values)
+    st.session_state.scad_code = scad_code
+    filename_base = tmpl["id"]
+
+    # ── Header ───────────────────────────────────────────────────────────────
+    st.markdown(f"### ✅ Ready to print: {tmpl['name']}")
+    st.caption("Review the code, export, and save your project.")
+
+    # ── OpenSCAD code block ───────────────────────────────────────────────────
+    with st.expander("📄 OpenSCAD code", expanded=True):
+        st.code(scad_code, language="cpp")
+
+    # ── Export ────────────────────────────────────────────────────────────────
+    st.markdown("#### 📦 Export")
+    col_scad, col_stl = st.columns(2)
+
+    with col_scad:
+        st.download_button(
+            "⬇️ Download .SCAD",
+            data=scad_code.encode("utf-8"),
+            file_name=f"{filename_base}.scad",
             mime="text/plain",
             use_container_width=True,
+            type="primary",
         )
-        if col_next.button("Send to Printer →", type="primary", use_container_width=True):
-            st.session_state.phase = "export"
-            st.rerun()
 
-        if st.session_state.slicer_log:
-            with st.expander("Full slicer log"):
-                st.code(st.session_state.slicer_log)
+    with col_stl:
+        openscad_path = _find_openscad()
+        if openscad_path:
+            if st.button("⚙️ Compile to STL", use_container_width=True):
+                with st.spinner("Compiling with OpenSCAD — this may take a moment…"):
+                    stl_bytes, err = _compile_stl(scad_code, openscad_path)
+                if err:
+                    st.error(f"Compile error: {err}")
+                else:
+                    st.session_state["_stl_bytes"] = stl_bytes
+                    st.session_state["_gcode_bytes"] = None
+                    st.rerun()
 
-# ══════════════════════════════════════════════════════════════════════════════
-# PHASE X · EXPORT — All transfer methods
-# ══════════════════════════════════════════════════════════════════════════════
-
-elif phase == "export":
-    st.subheader("Export & Send")
-
-    gcode_path = (
-        Path(st.session_state.gcode_path)
-        if st.session_state.gcode_path else None
-    )
-    stl_path = (
-        Path(st.session_state.stl_path)
-        if st.session_state.stl_path else None
-    )
-
-    # ── Quick downloads ───────────────────────────────────────────────────────
-    st.markdown("#### Quick Download")
-    dl1, dl2, dl3 = st.columns(3)
-
-    if gcode_path and gcode_path.exists():
-        dl1.download_button(
-            "⬇  Download G-code",
-            data=gcode_path.read_bytes(),
-            file_name=gcode_path.name,
-            mime="text/plain",
-        )
-    if stl_path and stl_path.exists():
-        dl2.download_button(
-            "⬇  Download STL",
-            data=stl_path.read_bytes(),
-            file_name=stl_path.name,
-            mime="application/octet-stream",
-        )
-    if dl3.button("💾  Copy to Downloads folder"):
-        if gcode_path and gcode_path.exists():
-            ok, msg = tr.copy_to_downloads(gcode_path)
-            (st.success if ok else st.error)(msg)
+            if st.session_state.get("_stl_bytes"):
+                st.download_button(
+                    "⬇️ Download STL",
+                    data=st.session_state["_stl_bytes"],
+                    file_name=f"{filename_base}.stl",
+                    mime="model/stl",
+                    use_container_width=True,
+                )
         else:
-            st.warning("No G-code file available yet.")
+            st.info(
+                "**OpenSCAD not installed.**\n\n"
+                "1. Download from [openscad.org](https://openscad.org/downloads.html)\n"
+                "2. Open the `.scad` file above\n"
+                "3. Press **F6** to render, then **File → Export → Export as STL**",
+                icon="ℹ️",
+            )
 
-    st.divider()
+    # Slice section (shown below the two-column row when an STL is ready)
+    if st.session_state.get("_stl_bytes"):
+        slicer = _find_slicer()
+        if slicer:
+            slicer_name, slicer_path = slicer
+            st.markdown("---")
+            col_slice, col_gcode = st.columns(2)
+            with col_slice:
+                if st.button(
+                    f"🔪 Slice with {slicer_name}",
+                    use_container_width=True,
+                ):
+                    with st.spinner(f"Slicing with {slicer_name}…"):
+                        gcode_bytes, err2 = _slice_stl(
+                            st.session_state["_stl_bytes"],
+                            slicer_name, slicer_path,
+                        )
+                    if err2:
+                        st.error(f"Slice error: {err2}")
+                    else:
+                        st.session_state["_gcode_bytes"] = gcode_bytes
+                        st.rerun()
+            with col_gcode:
+                if st.session_state.get("_gcode_bytes"):
+                    st.download_button(
+                        "⬇️ Download G-code",
+                        data=st.session_state["_gcode_bytes"],
+                        file_name=f"{filename_base}.gcode",
+                        mime="text/plain",
+                        use_container_width=True,
+                        type="primary",
+                    )
+        else:
+            st.caption(
+                "No slicer found on this machine. "
+                "Open the STL in PrusaSlicer, Cura, or OrcaSlicer to generate G-code."
+            )
 
-    # ── Transfer tabs ─────────────────────────────────────────────────────────
-    tab_email, tab_octo, tab_moon = st.tabs([
-        "📧  Email Transfer",
-        "🐙  OctoPrint",
-        "🌙  Moonraker / Klipper",
-    ])
+    # ── Project management ────────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("#### 💾 Project")
+    col_save, col_load = st.columns(2)
 
-    # ── Email ─────────────────────────────────────────────────────────────────
-    with tab_email:
-        st.markdown("Send the G-code as an email attachment.")
-        smtp_host = st.text_input("SMTP host", value="smtp.gmail.com",
-                                   placeholder="smtp.gmail.com")
-        smtp_port = st.number_input("SMTP port", min_value=1, max_value=65535,
-                                     value=465, step=1)
-        smtp_user = st.text_input("Your email address",
-                                   placeholder="you@gmail.com")
-        smtp_pass = st.text_input("Password / App Password", type="password")
-        to_addr   = st.text_input("Send to", placeholder="recipient@example.com")
-
-        st.caption(
-            "Gmail users: generate an **App Password** at "
-            "myaccount.google.com → Security → App passwords. "
-            "Do NOT use your regular password."
+    with col_save:
+        st.download_button(
+            "💾 Save Project (.vtp.json)",
+            data=_project_to_json().encode("utf-8"),
+            file_name=f"{filename_base}.vtp.json",
+            mime="application/json",
+            use_container_width=True,
         )
 
-        if st.button("Send Email", type="primary"):
-            if not gcode_path or not gcode_path.exists():
-                st.error("No G-code file to send. Complete the Slicer phase first.")
-            elif not all([smtp_host, smtp_user, smtp_pass, to_addr]):
-                st.error("Fill in all email fields.")
+    with col_load:
+        uploaded = st.file_uploader(
+            "Load existing project",
+            type=["json"],
+            key="project_uploader",
+            label_visibility="collapsed",
+        )
+        if uploaded is not None:
+            err = _load_project_json(uploaded.read())
+            if err:
+                st.error(err)
             else:
-                with st.spinner("Sending…"):
-                    ok, msg = tr.send_email(
-                        smtp_host, int(smtp_port),
-                        smtp_user, smtp_pass, to_addr, gcode_path,
-                    )
-                (st.success if ok else st.error)(msg)
-
-    # ── OctoPrint ─────────────────────────────────────────────────────────────
-    with tab_octo:
-        st.markdown("Upload directly to your OctoPrint instance.")
-        octo_ip  = st.text_input("OctoPrint IP / hostname",
-                                  placeholder="192.168.1.100 or octopi.local")
-        octo_key = st.text_input("OctoPrint API Key", type="password",
-                                  help="Settings → API → API Key")
-        octo_print_now = st.checkbox("Start printing immediately after upload")
-
-        if st.button("Upload to OctoPrint", type="primary"):
-            if not gcode_path or not gcode_path.exists():
-                st.error("No G-code file. Complete the Slicer phase first.")
-            elif not octo_ip or not octo_key:
-                st.error("Enter the OctoPrint IP and API key.")
-            else:
-                with st.spinner("Uploading to OctoPrint…"):
-                    ok, msg = tr.send_to_octoprint(
-                        octo_ip, octo_key, gcode_path, octo_print_now
-                    )
-                (st.success if ok else st.error)(msg)
-
-    # ── Moonraker ─────────────────────────────────────────────────────────────
-    with tab_moon:
-        st.markdown("Upload directly to Moonraker (Mainsail / Fluidd / Klipper).")
-        moon_ip        = st.text_input("Moonraker IP / hostname",
-                                        placeholder="192.168.1.101 or mainsail.local")
-        moon_print_now = st.checkbox("Start printing immediately after upload",
-                                      key="moon_print_now")
-
-        st.caption("Moonraker does not require an API key by default.")
-
-        if st.button("Upload to Moonraker", type="primary"):
-            if not gcode_path or not gcode_path.exists():
-                st.error("No G-code file. Complete the Slicer phase first.")
-            elif not moon_ip:
-                st.error("Enter the Moonraker IP address.")
-            else:
-                with st.spinner("Uploading to Moonraker…"):
-                    ok, msg = tr.send_to_moonraker(
-                        moon_ip, gcode_path, moon_print_now
-                    )
-                (st.success if ok else st.error)(msg)
-
-    st.divider()
+                st.success("Project loaded — returning to measurement step.")
+                time.sleep(0.8)
+                _go("results")
 
     # ── Navigation ────────────────────────────────────────────────────────────
-    col_back, col_restart = st.columns(2)
-    if col_back.button("← Back to Slicer"):
-        st.session_state.phase = "slicer"
-        st.rerun()
-    if col_restart.button("↺  Start a New Object", type="primary"):
-        reset_to("vision")
-        st.rerun()
+    st.markdown("---")
+    col_back, col_new = st.columns(2)
+    with col_back:
+        if st.button("← Back to measurements", use_container_width=True):
+            st.session_state["_stl_bytes"]   = None
+            st.session_state["_gcode_bytes"] = None
+            _go("results")
+    with col_new:
+        if st.button("🔄 Start New Project", use_container_width=True):
+            for _k in list(st.session_state.keys()):
+                del st.session_state[_k]
+            st.rerun()
+
+    st.stop()
