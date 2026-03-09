@@ -16,6 +16,8 @@ import hashlib
 import math
 import re
 import json
+import shutil
+import subprocess
 import time
 import tempfile
 import urllib.parse
@@ -616,6 +618,7 @@ _DEFAULTS: dict = {
     "scad_code":          "",
     "api_key":            "",          # HF / Claude / OpenAI token
     "ai_provider":        "none",      # none | hf | claude | openai | ollama
+    "show_refinement":    False,       # toggle refinement panel in results step
 }
 
 for _k, _v in _DEFAULTS.items():
@@ -1023,5 +1026,881 @@ if st.session_state.wizard_step == "identify":
         elif st.session_state.ai_provider == "ollama":
             st.caption("Make sure `ollama serve` is running on localhost:11434 "
                        "with the `llava` model pulled.")
+
+    st.stop()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SVG SCHEMATIC DIAGRAMS  (one per template, embedded inline)
+# ══════════════════════════════════════════════════════════════════════════════
+
+_SC  = "#1a6fa8"   # part stroke
+_SF  = "#daeeff"   # part fill
+_SD  = "#e63946"   # dimension colour
+_ST  = "#222222"   # general text
+
+_SVG_W, _SVG_H = 320, 200
+
+
+def _svg_wrap(inner: str) -> str:
+    return (
+        '<svg xmlns="http://www.w3.org/2000/svg" '
+        f'viewBox="0 0 {_SVG_W} {_SVG_H}" '
+        'style="width:100%;max-width:420px;border:1px solid #cde;'
+        'border-radius:8px;background:#fafcff">'
+        + inner + "</svg>"
+    )
+
+
+def _hline(x1: float, y: float, x2: float, lbl: str,
+           above: bool = True, col: str = _SD) -> str:
+    tk = 5
+    yo = y - 14 if above else y + 14
+    mx = (x1 + x2) / 2
+    return (
+        f'<line x1="{x1:.1f}" y1="{y:.1f}" x2="{x2:.1f}" y2="{y:.1f}" '
+        f'stroke="{col}" stroke-width="1.2"/>'
+        f'<line x1="{x1:.1f}" y1="{y-tk:.1f}" x2="{x1:.1f}" y2="{y+tk:.1f}" '
+        f'stroke="{col}" stroke-width="1.2"/>'
+        f'<line x1="{x2:.1f}" y1="{y-tk:.1f}" x2="{x2:.1f}" y2="{y+tk:.1f}" '
+        f'stroke="{col}" stroke-width="1.2"/>'
+        f'<text x="{mx:.1f}" y="{yo:.1f}" text-anchor="middle" '
+        f'font-size="10" fill="{col}" font-family="sans-serif">{lbl}</text>'
+    )
+
+
+def _vline(x: float, y1: float, y2: float, lbl: str,
+           right: bool = True, col: str = _SD) -> str:
+    tk = 5
+    xo = x + 16 if right else x - 16
+    my = (y1 + y2) / 2
+    return (
+        f'<line x1="{x:.1f}" y1="{y1:.1f}" x2="{x:.1f}" y2="{y2:.1f}" '
+        f'stroke="{col}" stroke-width="1.2"/>'
+        f'<line x1="{x-tk:.1f}" y1="{y1:.1f}" x2="{x+tk:.1f}" y2="{y1:.1f}" '
+        f'stroke="{col}" stroke-width="1.2"/>'
+        f'<line x1="{x-tk:.1f}" y1="{y2:.1f}" x2="{x+tk:.1f}" y2="{y2:.1f}" '
+        f'stroke="{col}" stroke-width="1.2"/>'
+        f'<text x="{xo:.1f}" y="{my:.1f}" text-anchor="middle" '
+        f'font-size="10" fill="{col}" font-family="sans-serif" '
+        f'transform="rotate(-90 {xo:.1f} {my:.1f})">{lbl}</text>'
+    )
+
+
+def _svg_knob(dv: dict) -> str:
+    kd  = float(dv.get("knob_d", 30))
+    kh  = float(dv.get("knob_h", 22))
+    sd  = float(dv.get("shaft_d", 6.35))
+    sdp = float(dv.get("shaft_depth", 15))
+    sc  = min(140 / max(kd, 1), 120 / max(kh, 1))
+    pw, ph = kd * sc, kh * sc
+    cx, cy = 150, 105
+    bx, by = cx - pw / 2, cy - ph / 2
+    shw = sd * sc
+    shh = min(sdp * sc, ph * 0.65)
+    sx  = cx - shw / 2
+    sy  = by + ph - shh
+    els = [
+        f'<rect x="{bx:.1f}" y="{by:.1f}" width="{pw:.1f}" height="{ph:.1f}" '
+        f'fill="{_SF}" stroke="{_SC}" stroke-width="2.5" rx="6"/>',
+        f'<rect x="{sx:.1f}" y="{sy:.1f}" width="{shw:.1f}" height="{shh:.1f}" '
+        f'fill="#b0cfe8" stroke="{_SC}" stroke-width="1.5"/>',
+        _hline(bx, by - 12, bx + pw, f"{kd:.1f} mm", above=True),
+        _vline(bx + pw + 5, by, by + ph, f"{kh:.1f} mm", right=True),
+        _hline(sx, by + ph + 18, sx + shw, f"⌀{sd:.2f}", above=False),
+    ]
+    return _svg_wrap("".join(els))
+
+
+def _svg_box(dv: dict) -> str:
+    iw   = float(dv.get("inner_w", 80))
+    ih   = float(dv.get("inner_h", 40))
+    wall = float(dv.get("wall", 2.5))
+    sc   = min(180 / max(iw + 2 * wall, 1), 130 / max(ih + wall, 1))
+    ow   = (iw + 2 * wall) * sc
+    oh   = (ih + wall) * sc
+    wsc  = wall * sc
+    cx, cy = 150, 100
+    ox, oy = cx - ow / 2, cy - oh / 2
+    els = [
+        f'<rect x="{ox:.1f}" y="{oy:.1f}" width="{ow:.1f}" height="{oh:.1f}" '
+        f'fill="{_SF}" stroke="{_SC}" stroke-width="2"/>',
+        f'<rect x="{ox+wsc:.1f}" y="{oy+wsc:.1f}" '
+        f'width="{iw*sc:.1f}" height="{ih*sc:.1f}" '
+        f'fill="#f0f8ff" stroke="{_SC}" stroke-width="1" stroke-dasharray="4 2"/>',
+        _hline(ox + wsc, oy - 14, ox + wsc + iw * sc, f"{iw:.0f} mm inner", above=True),
+        _hline(ox, oy + oh + 18, ox + ow, f"{iw + 2*wall:.0f} mm outer", above=False),
+        _vline(ox + ow + 5, oy, oy + oh, f"{ih + wall:.0f} mm", right=True),
+        _vline(ox - 5, oy + wsc, oy + oh, f"{ih:.0f} mm", right=False),
+    ]
+    return _svg_wrap("".join(els))
+
+
+def _svg_end_cap(dv: dict) -> str:
+    pd  = float(dv.get("plug_d", 24))
+    ph  = float(dv.get("plug_h", 15))
+    fd  = float(dv.get("flange_d", 29))
+    fh  = float(dv.get("flange_h", 3))
+    sc  = min(150 / max(fd, 1), 110 / max(ph + fh, 1))
+    pcx = 150
+    by  = 160
+    pw_half = pd / 2 * sc
+    fw_half = fd / 2 * sc
+    phsc    = ph * sc
+    fhsc    = fh * sc
+    els = [
+        f'<rect x="{pcx-fw_half:.1f}" y="{by-fhsc:.1f}" '
+        f'width="{fw_half*2:.1f}" height="{fhsc:.1f}" '
+        f'fill="{_SF}" stroke="{_SC}" stroke-width="2"/>',
+        f'<rect x="{pcx-pw_half:.1f}" y="{by-fhsc-phsc:.1f}" '
+        f'width="{pw_half*2:.1f}" height="{phsc:.1f}" '
+        f'fill="{_SF}" stroke="{_SC}" stroke-width="2"/>',
+        f'<line x1="{pcx:.1f}" y1="{by-fhsc-phsc-5:.1f}" '
+        f'x2="{pcx:.1f}" y2="{by+5:.1f}" '
+        f'stroke="#aaa" stroke-width="1" stroke-dasharray="6 3"/>',
+        _hline(pcx - pw_half, by - fhsc - phsc - 12,
+               pcx + pw_half, f"⌀{pd:.1f} plug", above=True),
+        _hline(pcx - fw_half, by + 16, pcx + fw_half, f"⌀{fd:.1f} flange", above=False),
+        _vline(pcx + fw_half + 5, by - fhsc - phsc, by, f"{ph+fh:.1f} mm", right=True),
+    ]
+    return _svg_wrap("".join(els))
+
+
+def _svg_l_bracket(dv: dict) -> str:
+    a1  = float(dv.get("arm1_len", 50))
+    a2  = float(dv.get("arm2_len", 50))
+    t   = float(dv.get("thickness", 4.5))
+    sc  = min(110 / max(a1, 1), 140 / max(a2, 1))
+    a1s, a2s, ts = a1 * sc, a2 * sc, max(t * sc, 5)
+    ox, oy = 80, 155
+    els = [
+        f'<rect x="{ox:.1f}" y="{oy-a1s:.1f}" width="{ts:.1f}" height="{a1s:.1f}" '
+        f'fill="{_SF}" stroke="{_SC}" stroke-width="2"/>',
+        f'<rect x="{ox:.1f}" y="{oy-ts:.1f}" width="{a2s:.1f}" height="{ts:.1f}" '
+        f'fill="{_SF}" stroke="{_SC}" stroke-width="2"/>',
+        _vline(ox - 5, oy - a1s, oy, f"{a1:.0f} mm", right=False),
+        _hline(ox, oy + 16, ox + a2s, f"{a2:.0f} mm", above=False),
+        f'<text x="{ox+a2s+12:.1f}" y="{oy-ts/2+4:.1f}" font-size="10" '
+        f'fill="{_SD}" font-family="sans-serif">t={t:.1f}</text>',
+    ]
+    return _svg_wrap("".join(els))
+
+
+def _svg_cable_clip(dv: dict) -> str:
+    cd  = float(dv.get("cable_d", 6))
+    wt  = float(dv.get("wall_t", 2.5))
+    bh  = float(dv.get("base_h", 8))
+    r_out = cd / 2 + wt
+    sc  = min(80 / max(r_out * 2, 1), 80 / max(bh + r_out * 2, 1))
+    cx, cy = 150, 100
+    ros = r_out * sc
+    ris = (cd / 2) * sc
+    bhs = bh * sc
+    els = [
+        f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="{ros:.1f}" '
+        f'fill="{_SF}" stroke="{_SC}" stroke-width="2"/>',
+        f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="{ris:.1f}" '
+        f'fill="#f0f8ff" stroke="{_SC}" stroke-width="1.2"/>',
+        f'<rect x="{cx-ros:.1f}" y="{cy+ros:.1f}" '
+        f'width="{ros*2:.1f}" height="{bhs:.1f}" '
+        f'fill="{_SF}" stroke="{_SC}" stroke-width="2"/>',
+        _hline(cx - ris, cy - ros - 12, cx + ris, f"⌀{cd:.1f} cable", above=True),
+        _hline(cx - ros, cy + ros + bhs + 14, cx + ros,
+               f"⌀{r_out*2:.1f} OD", above=False),
+        _vline(cx + ros + 5, cy + ros, cy + ros + bhs, f"{bh:.1f} mm", right=True),
+    ]
+    return _svg_wrap("".join(els))
+
+
+def _svg_wall_hook(dv: dict) -> str:
+    pht = float(dv.get("plate_h", 60))
+    pt  = float(dv.get("plate_t", 5))
+    hr  = float(dv.get("hook_reach", 40))
+    ht  = float(dv.get("hook_t", 6))
+    tip = float(dv.get("tip_h", 20))
+    sc  = min(60 / max(hr + pt, 1), 120 / max(pht, 1))
+    ox, oy = 65, 30
+    ps  = max(pt * sc, 5)
+    hs  = pht * sc
+    hrs = hr * sc
+    hts = max(ht * sc, 5)
+    tips = tip * sc
+    arm_y = oy + hs * 0.4
+    els = [
+        f'<rect x="{ox:.1f}" y="{oy:.1f}" width="{ps:.1f}" height="{hs:.1f}" '
+        f'fill="{_SF}" stroke="{_SC}" stroke-width="2"/>',
+        f'<rect x="{ox:.1f}" y="{arm_y:.1f}" width="{hrs:.1f}" height="{hts:.1f}" '
+        f'fill="{_SF}" stroke="{_SC}" stroke-width="2"/>',
+        f'<rect x="{ox+hrs-hts:.1f}" y="{arm_y-tips:.1f}" '
+        f'width="{hts:.1f}" height="{tips:.1f}" '
+        f'fill="{_SF}" stroke="{_SC}" stroke-width="2"/>',
+        _vline(ox - 5, oy, oy + hs, f"{pht:.0f} mm", right=False),
+        _hline(ox + ps, arm_y + hts + 14, ox + hrs, f"{hr:.0f} mm", above=False),
+        _vline(ox + hrs + 5, arm_y - tips, arm_y, f"{tip:.0f} mm", right=True),
+    ]
+    return _svg_wrap("".join(els))
+
+
+def _svg_spacer(dv: dict) -> str:
+    od  = float(dv.get("outer_d", 20))
+    iid = float(dv.get("inner_d", 5))
+    h   = float(dv.get("height", 5))
+    sc  = min(140 / max(od, 1), 80 / max(h * 4, 1))
+    cx  = 150
+    ty  = 65
+    ods = od * sc
+    ids = iid * sc
+    hs  = h * sc
+    els = [
+        f'<rect x="{cx-ods/2:.1f}" y="{ty:.1f}" width="{ods:.1f}" height="{hs:.1f}" '
+        f'fill="{_SF}" stroke="{_SC}" stroke-width="2"/>',
+        f'<rect x="{cx-ids/2:.1f}" y="{ty-1:.1f}" '
+        f'width="{ids:.1f}" height="{hs+2:.1f}" '
+        f'fill="white" stroke="{_SC}" stroke-width="1.2"/>',
+        f'<line x1="{cx:.1f}" y1="{ty-8:.1f}" x2="{cx:.1f}" y2="{ty+hs+8:.1f}" '
+        f'stroke="#aaa" stroke-width="1" stroke-dasharray="4 2"/>',
+        _hline(cx - ods/2, ty - 14, cx + ods/2, f"⌀{od:.1f} OD", above=True),
+        _hline(cx - ids/2, ty + hs + 16, cx + ids/2, f"⌀{iid:.1f} bore", above=False),
+        _vline(cx + ods/2 + 5, ty, ty + hs, f"{h:.1f} mm", right=True),
+    ]
+    return _svg_wrap("".join(els))
+
+
+def _svg_drawer_pull(dv: dict) -> str:
+    sp  = float(dv.get("span", 96))
+    gl  = float(dv.get("grip_len", 110))
+    gw  = float(dv.get("grip_w", 18))
+    gh  = float(dv.get("grip_h", 25))
+    sc  = min(220 / max(gl, 1), 90 / max(gh + gw, 1))
+    cls = gl * sc
+    sps = sp * sc
+    ghs = gh * sc
+    gws = gw * sc
+    cx  = 160
+    by  = 145
+    off = (gl - sp) / 2 * sc
+    lx  = cx - cls / 2
+    els = [
+        f'<rect x="{lx:.1f}" y="{by-ghs:.1f}" width="{gws:.1f}" height="{ghs:.1f}" '
+        f'fill="{_SF}" stroke="{_SC}" stroke-width="2" rx="3"/>',
+        f'<rect x="{lx+cls-gws:.1f}" y="{by-ghs:.1f}" '
+        f'width="{gws:.1f}" height="{ghs:.1f}" '
+        f'fill="{_SF}" stroke="{_SC}" stroke-width="2" rx="3"/>',
+        f'<rect x="{lx:.1f}" y="{by-ghs-gws*0.4:.1f}" '
+        f'width="{cls:.1f}" height="{gws*0.4:.1f}" '
+        f'fill="{_SF}" stroke="{_SC}" stroke-width="2" rx="4"/>',
+        _hline(lx + off, by + 14, lx + off + sps, f"{sp:.0f} mm span", above=False),
+        _hline(lx, by - ghs - 16, lx + cls, f"{gl:.0f} mm total", above=True),
+        _vline(lx - 5, by - ghs, by, f"{gh:.0f} mm", right=False),
+    ]
+    return _svg_wrap("".join(els))
+
+
+def _svg_button_cap(dv: dict) -> str:
+    cd  = float(dv.get("cap_d", 14))
+    ch  = float(dv.get("cap_h", 7))
+    sh  = float(dv.get("skirt_h", 3))
+    sw  = float(dv.get("stem_w", 4))
+    sdp = float(dv.get("stem_h", 5))
+    sc  = min(140 / max(cd, 1), 100 / max(ch + sh, 1))
+    cds = cd * sc
+    chs = ch * sc
+    shs = sh * sc
+    sws = sw * sc
+    sdps = min(sdp * sc, chs * 0.7)
+    cx  = 150
+    ty  = 45
+    els = [
+        f'<rect x="{cx-cds/2-2:.1f}" y="{ty:.1f}" '
+        f'width="{cds+4:.1f}" height="{shs:.1f}" '
+        f'fill="{_SF}" stroke="{_SC}" stroke-width="2"/>',
+        f'<rect x="{cx-cds/2:.1f}" y="{ty+shs:.1f}" '
+        f'width="{cds:.1f}" height="{chs:.1f}" '
+        f'fill="{_SF}" stroke="{_SC}" stroke-width="2" rx="6"/>',
+        f'<rect x="{cx-sws/2:.1f}" y="{ty+shs:.1f}" '
+        f'width="{sws:.1f}" height="{sdps:.1f}" '
+        f'fill="white" stroke="{_SC}" stroke-width="1.2" stroke-dasharray="3 2"/>',
+        _hline(cx - cds/2, ty + shs + chs + 16, cx + cds/2, f"⌀{cd:.1f} mm", above=False),
+        _vline(cx + cds/2 + 5, ty, ty + shs + chs, f"{ch+sh:.1f} mm", right=True),
+        _hline(cx - sws/2, ty - 12, cx + sws/2, f"{sw:.1f} stem", above=True),
+    ]
+    return _svg_wrap("".join(els))
+
+
+_SVG_DISPATCH: dict = {
+    "knob_d_shaft":     _svg_knob,
+    "knob_round_shaft": _svg_knob,
+    "knob_pointer":     _svg_knob,
+    "box_open":         _svg_box,
+    "box_with_lid":     _svg_box,
+    "end_cap":          _svg_end_cap,
+    "l_bracket":        _svg_l_bracket,
+    "cable_clip":       _svg_cable_clip,
+    "wall_hook":        _svg_wall_hook,
+    "spacer":           _svg_spacer,
+    "drawer_pull":      _svg_drawer_pull,
+    "button_cap":       _svg_button_cap,
+}
+
+
+def part_svg(template_id: str, dim_values: dict) -> str:
+    fn = _SVG_DISPATCH.get(template_id)
+    if fn is None:
+        return _svg_wrap(
+            f'<text x="160" y="100" text-anchor="middle" '
+            f'font-size="14" fill="{_ST}">No diagram available</text>'
+        )
+    return fn(dim_values)
+
+
+# ── Caliper measurement tips per template ─────────────────────────────────────
+
+_CALIPER_TIPS: dict[str, list[str]] = {
+    "knob_d_shaft": [
+        "**Shaft diameter:** Use inside jaws around the shaft.",
+        "**Flat depth:** Measure full shaft diameter, then measure from flat to opposite edge. flat_cut = (diameter/2) − that reading.",
+        "**Shaft depth:** Push depth probe into the bore.",
+        "**Knob diameter:** Outside jaws on the original knob or use a ruler.",
+    ],
+    "knob_round_shaft": [
+        "**Shaft diameter:** Inside jaws around the shaft.",
+        "**Knob diameter:** Outside jaws on widest part of old knob.",
+        "**Set-screw hole:** Usually M3 thread → 2.5 mm drill size.",
+    ],
+    "knob_pointer": [
+        "**Shaft diameter:** Inside jaws on the D-shaft.",
+        "**Knob diameter:** Outside jaws on original knob.",
+        "**Pointer width:** Decide — 2–4 mm is typical.",
+    ],
+    "box_open": [
+        "**Inner width/depth:** Measure the contents that must fit inside.",
+        "**Inner height:** Measure from base to intended top edge.",
+        "**Wall thickness:** 2–3 mm for light objects, 3–5 mm for heavier loads.",
+    ],
+    "box_with_lid": [
+        "**Inner dimensions:** Measure the contents to contain.",
+        "**Lid height:** The rim that overlaps the box — typically 6–10 mm.",
+        "**Press-fit gap:** 0.2 mm = snug, 0.3 mm = standard, 0.4 mm = easy.",
+    ],
+    "end_cap": [
+        "**Plug diameter:** Measure INSIDE the tube with inside jaws.",
+        "**Flange diameter:** Should be slightly larger than tube outer diameter.",
+        "**Plug depth:** Use depth probe inside the tube.",
+    ],
+    "l_bracket": [
+        "**Arm lengths:** Span from corner to mounting hole centre, plus margin.",
+        "**Thickness:** 3–5 mm light loads, 6–8 mm heavy shelves.",
+        "**Hole diameter:** Measure screw shank, not thread diameter.",
+    ],
+    "cable_clip": [
+        "**Cable diameter:** Wrap paper around cable, mark overlap, measure strip ÷ 3.14.",
+        "**Clip width:** How far along cable the clip grips — 15–25 mm typical.",
+        "**Gap %:** 60% = hard snap, 70% = normal, 80% = easy-open.",
+    ],
+    "wall_hook": [
+        "**Plate height:** Measure wall section available for mounting.",
+        "**Hook reach:** Distance from wall to item + 10 mm clearance.",
+        "**Tip height:** Must exceed the item height to prevent it falling off.",
+        "**Screw hole:** Match your wall plugs (4 mm for most standard plugs).",
+    ],
+    "spacer": [
+        "**Outer diameter:** Measure the recess or step that accepts the spacer.",
+        "**Bore diameter:** Measure the bolt or shaft the spacer fits onto.",
+        "**Height:** Use depth probe to measure the gap to fill.",
+    ],
+    "drawer_pull": [
+        "**Span (c-c):** Measure centre-to-centre between the two screw holes.",
+        "**Grip length:** Usually span + 10–20 mm for the end caps.",
+        "**Grip height:** How far the handle stands off the drawer face.",
+    ],
+    "button_cap": [
+        "**Cap diameter:** Measure the recess or housing where the button lives.",
+        "**Stem socket:** Measure button stem — square PCB stems common.",
+        "**Stem depth:** How deep the socket grips for secure clicking.",
+    ],
+}
+
+_CALIPER_TIPS_DEFAULT = [
+    "Use **outside jaws** for external measurements.",
+    "Use **inside jaws** for holes and bores.",
+    "Use the **depth probe** for pocket and slot depths.",
+    "Always measure twice and print a test piece first.",
+]
+
+
+def _caliper_tips_html(template_id: str) -> str:
+    tips = _CALIPER_TIPS.get(template_id, _CALIPER_TIPS_DEFAULT)
+    items = "".join(
+        f"<li style='margin-bottom:6px'>{t}</li>" for t in tips
+    )
+    return (
+        f"<ul style='padding-left:18px;margin:0;font-size:14px'>"
+        f"{items}</ul>"
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STEP 2 — VALIDATE & REFINE  (wizard_step == "results")
+# ══════════════════════════════════════════════════════════════════════════════
+
+if st.session_state.wizard_step == "results":
+
+    res = st.session_state.identify_result
+    if not res:
+        _go("identify")
+
+    tmpl = tmpl_get(res.get("template_id", ""))
+    if not tmpl:
+        tmpl = INTERNAL_TEMPLATES[0]
+
+    # ── AI Interpretation Card ────────────────────────────────────────────────
+    st.markdown("### 🔍 What we found")
+
+    c_info, c_badge = st.columns([2, 1])
+    with c_info:
+        if res.get("caption"):
+            st.markdown(f"**Photo:** {res['caption']}")
+        desc = res.get("project_description") or tmpl["description"]
+        st.markdown(f"**Plan:** {desc}")
+        st.markdown(f"**Template:** {tmpl['name']}")
+        st.caption(f"Method: {res.get('method', 'keyword')}")
+        if res.get("warning"):
+            st.warning(res["warning"])
+    with c_badge:
+        st.markdown(
+            f'<div style="background:#e8f4f8;border-radius:10px;padding:14px;'
+            f'text-align:center;margin-top:4px">'
+            f'<div style="font-size:32px">🖨️</div>'
+            f'<div style="font-weight:700;font-size:13px;margin-top:4px">'
+            f'{tmpl["category"]}</div></div>',
+            unsafe_allow_html=True,
+        )
+
+    st.markdown("---")
+
+    # ── Initialise dim_values from template defaults + AI suggestions ─────────
+    if not st.session_state.dim_values:
+        suggested = res.get("suggested_dims", {})
+        st.session_state.dim_values = {}
+        for dim in tmpl["dims"]:
+            raw = suggested.get(dim["id"])
+            st.session_state.dim_values[dim["id"]] = (
+                str(raw) if raw is not None else str(dim["default"])
+            )
+
+    # ── Measurement diagram ───────────────────────────────────────────────────
+    st.markdown("#### 📐 Measurement diagram")
+    svg_html = part_svg(tmpl["id"], st.session_state.dim_values)
+    st.markdown(
+        f'<div style="text-align:center;margin:8px 0">{svg_html}</div>',
+        unsafe_allow_html=True,
+    )
+
+    # ── Confirmation buttons ──────────────────────────────────────────────────
+    st.markdown("**Does this look right?**")
+    btn_yes, btn_no = st.columns(2)
+    with btn_yes:
+        if st.button("✅ Yes — looks good!", use_container_width=True, type="primary"):
+            st.session_state.selected_template = tmpl
+            _go("dimensions")
+    with btn_no:
+        if st.button("✏️ No — let me adjust", use_container_width=True):
+            st.session_state.show_refinement = True
+            st.rerun()
+
+    # ── Refinement panel ─────────────────────────────────────────────────────
+    if st.session_state.show_refinement:
+
+        st.markdown("---")
+        st.markdown("#### ✏️ Adjust measurements")
+
+        dims = tmpl["dims"]
+        updated_dims: dict[str, str] = {}
+        pairs = [dims[i: i + 2] for i in range(0, len(dims), 2)]
+        for pair in pairs:
+            cols = st.columns(len(pair))
+            for col, dim in zip(cols, pair):
+                with col:
+                    current = float(
+                        st.session_state.dim_values.get(dim["id"], dim["default"])
+                    )
+                    val = st.number_input(
+                        dim["question"],
+                        value=current,
+                        step=0.5 if dim["unit"] == "mm" else 1.0,
+                        format="%.1f" if dim["unit"] in ("mm", "") else "%.0f",
+                        key=f"dim_{dim['id']}",
+                    )
+                    updated_dims[dim["id"]] = str(val)
+
+        # Live-updating diagram
+        st.markdown("**Live preview:**")
+        live_svg = part_svg(tmpl["id"], updated_dims)
+        st.markdown(
+            f'<div style="text-align:center;margin:8px 0">{live_svg}</div>',
+            unsafe_allow_html=True,
+        )
+
+        # Caliper guide
+        with st.expander("📏 How to measure — Caliper guide"):
+            st.markdown(_caliper_tips_html(tmpl["id"]), unsafe_allow_html=True)
+            st.markdown(
+                "**No caliper?** A ruler works for external dims; "
+                "wrap paper around cylinders to measure diameter."
+            )
+
+        # Re-analyse
+        st.markdown("---")
+        re_desc = st.text_area(
+            "Refine your description and re-analyse:",
+            value=st.session_state.vibe_description,
+            key="re_analyse_desc",
+            height=80,
+        )
+        if st.button("🔍 Re-analyse with updated description"):
+            st.session_state.vibe_description = re_desc
+            with st.spinner("Re-analysing…"):
+                st.session_state.identify_result = analyze_input(
+                    st.session_state.image_bytes,
+                    re_desc,
+                    hf_token=st.session_state.api_key,
+                    ai_provider=st.session_state.ai_provider,
+                )
+            st.session_state.dim_values = {}
+            st.session_state.show_refinement = False
+            st.rerun()
+
+        st.markdown("---")
+        if st.button("✅ Finalize Measurements",
+                     use_container_width=True, type="primary"):
+            st.session_state.dim_values = updated_dims
+            st.session_state.selected_template = tmpl
+            st.session_state.show_refinement = False
+            _go("dimensions")
+
+    st.stop()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STEP 3 — FINALIZE & EXPORT  (wizard_step == "dimensions")
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── Tool-detection helpers ────────────────────────────────────────────────────
+
+def _find_openscad() -> str | None:
+    """Return path to OpenSCAD executable, or None if not found."""
+    if p := shutil.which("openscad"):
+        return p
+    candidates = [
+        r"C:\Program Files\OpenSCAD\openscad.exe",
+        r"C:\Program Files (x86)\OpenSCAD\openscad.exe",
+        "/Applications/OpenSCAD.app/Contents/MacOS/OpenSCAD",
+        "/usr/bin/openscad",
+        "/usr/local/bin/openscad",
+    ]
+    for c in candidates:
+        if Path(c).exists():
+            return c
+    return None
+
+
+def _find_slicer() -> tuple[str, str] | None:
+    """Return (slicer_name, path) for PrusaSlicer or Cura, or None."""
+    prusa_candidates = [
+        shutil.which("prusa-slicer-console"),
+        shutil.which("prusa-slicer"),
+        shutil.which("PrusaSlicer"),
+        r"C:\Program Files\Prusa3D\PrusaSlicer\prusa-slicer-console.exe",
+        r"C:\Program Files\PrusaSlicer\prusa-slicer-console.exe",
+        "/Applications/PrusaSlicer.app/Contents/MacOS/PrusaSlicer",
+        "/usr/bin/prusa-slicer",
+    ]
+    for p in prusa_candidates:
+        if p and Path(p).exists():
+            return ("PrusaSlicer", p)
+    cura_candidates = [
+        shutil.which("CuraEngine"),
+        r"C:\Program Files\Ultimaker Cura\CuraEngine.exe",
+        r"C:\Program Files\UltiMaker Cura\CuraEngine.exe",
+        "/usr/bin/CuraEngine",
+    ]
+    for p in cura_candidates:
+        if p and Path(p).exists():
+            return ("CuraEngine", p)
+    return None
+
+
+# ── Compile / slice helpers ───────────────────────────────────────────────────
+
+def _compile_stl(scad_code: str, openscad_path: str) -> tuple[bytes | None, str]:
+    """
+    Run OpenSCAD in headless mode to produce an STL.
+    Returns (stl_bytes, error_message).  error_message is '' on success.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        scad_file = Path(td) / "part.scad"
+        stl_file  = Path(td) / "part.stl"
+        scad_file.write_text(scad_code, encoding="utf-8")
+        try:
+            result = subprocess.run(
+                [openscad_path, "-o", str(stl_file), str(scad_file)],
+                capture_output=True, text=True, timeout=120,
+            )
+            if stl_file.exists() and stl_file.stat().st_size > 0:
+                return stl_file.read_bytes(), ""
+            stderr = (result.stderr or "").strip()
+            return None, stderr or "OpenSCAD produced no output — check your parameters."
+        except subprocess.TimeoutExpired:
+            return None, "OpenSCAD timed out (>120 s). Simplify the model or lower $fn."
+        except FileNotFoundError:
+            return None, f"OpenSCAD not found at: {openscad_path}"
+        except Exception as exc:
+            return None, str(exc)
+
+
+def _slice_stl(stl_bytes: bytes, slicer_name: str,
+               slicer_path: str) -> tuple[bytes | None, str]:
+    """
+    Slice an STL with PrusaSlicer CLI.
+    Returns (gcode_bytes, error_message).
+    """
+    if slicer_name != "PrusaSlicer":
+        return None, (
+            f"{slicer_name} CLI slicing is not yet supported here. "
+            "Open the STL in your slicer manually."
+        )
+    with tempfile.TemporaryDirectory() as td:
+        stl_file   = Path(td) / "part.stl"
+        gcode_file = Path(td) / "part.gcode"
+        stl_file.write_bytes(stl_bytes)
+        try:
+            result = subprocess.run(
+                [slicer_path, "--export-gcode",
+                 "--output", str(gcode_file), str(stl_file)],
+                capture_output=True, text=True, timeout=300,
+            )
+            if gcode_file.exists() and gcode_file.stat().st_size > 0:
+                return gcode_file.read_bytes(), ""
+            stderr = (result.stderr or "").strip()
+            return None, stderr or "PrusaSlicer produced no G-code output."
+        except subprocess.TimeoutExpired:
+            return None, "PrusaSlicer timed out. Try slicing manually."
+        except Exception as exc:
+            return None, str(exc)
+
+
+# ── Project save / load ───────────────────────────────────────────────────────
+
+def _project_to_json() -> str:
+    """Serialise current project to a JSON string."""
+    img_b64 = ""
+    if st.session_state.image_bytes:
+        img_b64 = base64.b64encode(st.session_state.image_bytes).decode()
+    tmpl = st.session_state.selected_template or {}
+    res  = st.session_state.identify_result  or {}
+    return json.dumps({
+        "vtp_version":         "1.0",
+        "saved_at":            time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "template_id":         tmpl.get("id", ""),
+        "vibe_description":    st.session_state.vibe_description,
+        "project_description": res.get("project_description", ""),
+        "dim_values":          st.session_state.dim_values,
+        "image_b64":           img_b64,
+        "image_media_type":    st.session_state.image_media_type,
+    }, indent=2)
+
+
+def _load_project_json(raw: bytes) -> str:
+    """
+    Populate st.session_state from a .vtp.json file.
+    Returns an error string, or '' on success.
+    """
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return "File is not valid JSON."
+    if data.get("vtp_version") != "1.0":
+        return "Unrecognised project format (expected vtp_version 1.0)."
+    tid  = data.get("template_id", "")
+    tmpl = tmpl_get(tid)
+    if not tmpl:
+        return f"Template '{tid}' not found in this version of the app."
+
+    st.session_state.selected_template  = tmpl
+    st.session_state.vibe_description   = data.get("vibe_description", "")
+    st.session_state.dim_values         = data.get("dim_values", {})
+    st.session_state.image_media_type   = data.get("image_media_type", "image/jpeg")
+    img_b64 = data.get("image_b64", "")
+    if img_b64:
+        try:
+            st.session_state.image_bytes = base64.b64decode(img_b64)
+        except Exception:
+            st.session_state.image_bytes = None
+    else:
+        st.session_state.image_bytes = None
+
+    # Reconstruct a minimal identify_result so Step 2 can display context
+    st.session_state.identify_result = {
+        "project_description": data.get("project_description", ""),
+        "template_id":         tid,
+        "template_name":       tmpl["name"],
+        "suggested_dims":      data.get("dim_values", {}),
+        "method":              "loaded from file",
+        "warning":             "",
+        "caption":             "",
+    }
+    st.session_state.show_refinement = False
+    return ""
+
+
+# ── Wizard Step 3 ─────────────────────────────────────────────────────────────
+
+if st.session_state.wizard_step == "dimensions":
+
+    tmpl = st.session_state.selected_template
+    if not tmpl:
+        _go("identify")
+
+    dim_values = st.session_state.dim_values or {
+        d["id"]: str(d["default"]) for d in tmpl["dims"]
+    }
+
+    scad_code = tmpl_generate_scad(tmpl, dim_values)
+    st.session_state.scad_code = scad_code
+    filename_base = tmpl["id"]
+
+    # ── Header ───────────────────────────────────────────────────────────────
+    st.markdown(f"### ✅ Ready to print: {tmpl['name']}")
+    st.caption("Review the code, export, and save your project.")
+
+    # ── OpenSCAD code block ───────────────────────────────────────────────────
+    with st.expander("📄 OpenSCAD code", expanded=True):
+        st.code(scad_code, language="cpp")
+
+    # ── Export ────────────────────────────────────────────────────────────────
+    st.markdown("#### 📦 Export")
+    col_scad, col_stl = st.columns(2)
+
+    with col_scad:
+        st.download_button(
+            "⬇️ Download .SCAD",
+            data=scad_code.encode("utf-8"),
+            file_name=f"{filename_base}.scad",
+            mime="text/plain",
+            use_container_width=True,
+            type="primary",
+        )
+
+    with col_stl:
+        openscad_path = _find_openscad()
+        if openscad_path:
+            if st.button("⚙️ Compile to STL", use_container_width=True):
+                with st.spinner("Compiling with OpenSCAD — this may take a moment…"):
+                    stl_bytes, err = _compile_stl(scad_code, openscad_path)
+                if err:
+                    st.error(f"Compile error: {err}")
+                else:
+                    st.session_state["_stl_bytes"] = stl_bytes
+                    st.session_state["_gcode_bytes"] = None
+                    st.rerun()
+
+            if st.session_state.get("_stl_bytes"):
+                st.download_button(
+                    "⬇️ Download STL",
+                    data=st.session_state["_stl_bytes"],
+                    file_name=f"{filename_base}.stl",
+                    mime="model/stl",
+                    use_container_width=True,
+                )
+        else:
+            st.info(
+                "**OpenSCAD not installed.**\n\n"
+                "1. Download from [openscad.org](https://openscad.org/downloads.html)\n"
+                "2. Open the `.scad` file above\n"
+                "3. Press **F6** to render, then **File → Export → Export as STL**",
+                icon="ℹ️",
+            )
+
+    # Slice section (shown below the two-column row when an STL is ready)
+    if st.session_state.get("_stl_bytes"):
+        slicer = _find_slicer()
+        if slicer:
+            slicer_name, slicer_path = slicer
+            st.markdown("---")
+            col_slice, col_gcode = st.columns(2)
+            with col_slice:
+                if st.button(
+                    f"🔪 Slice with {slicer_name}",
+                    use_container_width=True,
+                ):
+                    with st.spinner(f"Slicing with {slicer_name}…"):
+                        gcode_bytes, err2 = _slice_stl(
+                            st.session_state["_stl_bytes"],
+                            slicer_name, slicer_path,
+                        )
+                    if err2:
+                        st.error(f"Slice error: {err2}")
+                    else:
+                        st.session_state["_gcode_bytes"] = gcode_bytes
+                        st.rerun()
+            with col_gcode:
+                if st.session_state.get("_gcode_bytes"):
+                    st.download_button(
+                        "⬇️ Download G-code",
+                        data=st.session_state["_gcode_bytes"],
+                        file_name=f"{filename_base}.gcode",
+                        mime="text/plain",
+                        use_container_width=True,
+                        type="primary",
+                    )
+        else:
+            st.caption(
+                "No slicer found on this machine. "
+                "Open the STL in PrusaSlicer, Cura, or OrcaSlicer to generate G-code."
+            )
+
+    # ── Project management ────────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("#### 💾 Project")
+    col_save, col_load = st.columns(2)
+
+    with col_save:
+        st.download_button(
+            "💾 Save Project (.vtp.json)",
+            data=_project_to_json().encode("utf-8"),
+            file_name=f"{filename_base}.vtp.json",
+            mime="application/json",
+            use_container_width=True,
+        )
+
+    with col_load:
+        uploaded = st.file_uploader(
+            "Load existing project",
+            type=["json"],
+            key="project_uploader",
+            label_visibility="collapsed",
+        )
+        if uploaded is not None:
+            err = _load_project_json(uploaded.read())
+            if err:
+                st.error(err)
+            else:
+                st.success("Project loaded — returning to measurement step.")
+                time.sleep(0.8)
+                _go("results")
+
+    # ── Navigation ────────────────────────────────────────────────────────────
+    st.markdown("---")
+    col_back, col_new = st.columns(2)
+    with col_back:
+        if st.button("← Back to measurements", use_container_width=True):
+            st.session_state["_stl_bytes"]   = None
+            st.session_state["_gcode_bytes"] = None
+            _go("results")
+    with col_new:
+        if st.button("🔄 Start New Project", use_container_width=True):
+            for _k in list(st.session_state.keys()):
+                del st.session_state[_k]
+            st.rerun()
 
     st.stop()
