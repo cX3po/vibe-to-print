@@ -662,3 +662,366 @@ if st.session_state.wizard_step == "welcome":
             _go("identify")
 
     st.stop()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# AI ANALYSIS ENGINE  (embedded — no external module imports)
+# ══════════════════════════════════════════════════════════════════════════════
+
+_BLIP_URL     = "https://api-inference.huggingface.co/models/Salesforce/blip-image-captioning-large"
+_HF_TEXT_URL  = "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.3"
+_BLIP_TIMEOUT = 35
+_HF_TIMEOUT   = 45
+
+
+def _blip_caption(image_bytes: bytes, hf_token: str = "") -> str:
+    """Return a plain-English caption from BLIP. Empty string on failure."""
+    headers = {"Authorization": f"Bearer {hf_token}"} if hf_token else {}
+    try:
+        r = requests.post(_BLIP_URL, headers=headers,
+                          data=image_bytes, timeout=_BLIP_TIMEOUT)
+        if r.ok:
+            data = r.json()
+            if isinstance(data, list) and data:
+                return data[0].get("generated_text", "").strip()
+    except Exception:
+        pass
+    return ""
+
+
+def _hf_chat(prompt: str, hf_token: str = "", max_tokens: int = 512) -> str:
+    """Single-turn HF Inference API chat completion. Returns raw text."""
+    try:
+        from huggingface_hub import InferenceClient
+        client = InferenceClient(token=hf_token or None)
+        resp   = client.chat_completion(
+            model="mistralai/Mistral-7B-Instruct-v0.3",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=max_tokens,
+        )
+        return (resp.choices[0].message.content or "").strip()
+    except Exception:
+        return ""
+
+
+def _ollama_chat(prompt: str, model: str = "llava") -> str:
+    """Single-turn Ollama chat. Returns raw text."""
+    try:
+        r = requests.post(
+            "http://localhost:11434/api/chat",
+            json={"model": model,
+                  "messages": [{"role": "user", "content": prompt}],
+                  "stream": False},
+            timeout=60,
+        )
+        if r.ok:
+            return r.json().get("message", {}).get("content", "").strip()
+    except Exception:
+        pass
+    return ""
+
+
+# ── Keyword fallback: creation idea ──────────────────────────────────────────
+
+_KEYWORD_MAP = [
+    (["knob", "dial", "control", "pot", "rotary", "stove"],
+     "Replacing a missing or broken control knob."),
+    (["hinge", "door", "lid", "flap"],
+     "Replacing a broken hinge or pivot."),
+    (["bracket", "mount", "holder", "clip", "clamp", "shelf"],
+     "Fabricating a custom mounting bracket or holder."),
+    (["gear", "cog", "wheel", "sprocket"],
+     "Replacing a broken gear or drive wheel."),
+    (["hook", "hang", "wall"],
+     "Making a wall-mount hook or hanger."),
+    (["box", "enclosure", "case", "tray", "container"],
+     "Building a custom enclosure or storage box."),
+    (["handle", "grip", "pull", "lever"],
+     "Replacing a handle or grip."),
+    (["cap", "plug", "cover", "stopper", "end cap"],
+     "Making a protective cap or tube plug."),
+    (["spacer", "washer", "shim", "standoff"],
+     "Fabricating a precision spacer or washer."),
+    (["cable", "wire", "cord"],
+     "Making a cable management clip."),
+    (["button", "switch", "key"],
+     "Replacing a push-button or switch cap."),
+    (["drawer", "cabinet", "furniture"],
+     "Replacing a drawer pull or cabinet handle."),
+]
+
+_KEYWORD_TEMPLATE_MAP = [
+    (["knob", "dial", "stove", "d-shaft", "d shaft", "potentiometer", "pot"],
+     "knob_d_shaft"),
+    (["set screw", "round shaft", "round bore"],
+     "knob_round_shaft"),
+    (["pointer", "indicator"],
+     "knob_pointer"),
+    (["box", "tray", "container", "open top", "organiser"],
+     "box_open"),
+    (["lid", "enclosure", "case", "project box"],
+     "box_with_lid"),
+    (["cap", "plug", "tube", "pipe", "end cap", "stopper"],
+     "end_cap"),
+    (["bracket", "l bracket", "angle", "mount", "shelf support"],
+     "l_bracket"),
+    (["cable", "wire", "clip", "snap"],
+     "cable_clip"),
+    (["hook", "wall hook", "hanger", "coat"],
+     "wall_hook"),
+    (["spacer", "washer", "shim", "standoff", "bushing"],
+     "spacer"),
+    (["drawer", "handle", "pull", "cabinet", "furniture"],
+     "drawer_pull"),
+    (["button", "switch cap", "key cap", "push button"],
+     "button_cap"),
+]
+
+
+def _keyword_template(caption: str, description: str) -> str | None:
+    text = f"{caption} {description}".lower()
+    for keywords, tid in _KEYWORD_TEMPLATE_MAP:
+        if any(kw in text for kw in keywords):
+            return tid
+    return None
+
+
+def _keyword_description(caption: str, description: str, template: dict | None) -> str:
+    if template:
+        return f"Replacing or replicating a {template['name'].lower()}. {template['description']}"
+    text = f"{caption} {description}".lower()
+    for keywords, idea in _KEYWORD_MAP:
+        if any(kw in text for kw in keywords):
+            return idea
+    return (f"Creating a custom 3D-printed replacement part based on "
+            f"{'the photo' if caption else 'your description'}.")
+
+
+def _default_dims(template: dict) -> dict[str, str]:
+    return {d["id"]: str(d["default"]) for d in template["dims"]}
+
+
+# ── Master analysis function ──────────────────────────────────────────────────
+
+def analyze_input(
+    image_bytes:  bytes | None,
+    description:  str,
+    hf_token:     str = "",
+    ai_provider:  str = "none",   # "none" | "hf" | "ollama"
+) -> dict:
+    """
+    Full pipeline: BLIP caption → template match → structured result.
+
+    Returns:
+    {
+        "caption":             str,   # BLIP output
+        "project_description": str,   # human-friendly task summary
+        "template_id":         str,   # matched INTERNAL_TEMPLATES id
+        "template_name":       str,
+        "suggested_dims":      {id: str},
+        "method":              str,   # how we got here
+        "warning":             str,   # non-fatal message for UI
+    }
+    """
+    caption = ""
+    warning = ""
+    method  = "keyword"
+
+    # ── Step 1: BLIP caption ─────────────────────────────────────────────────
+    if image_bytes:
+        caption = _blip_caption(image_bytes, hf_token)
+        if not caption:
+            warning = ("Photo AI is warming up or rate-limited — "
+                       "results based on your description.")
+
+    combined = f"{caption} {description}".strip()
+
+    # ── Step 2: Try AI for structured JSON ───────────────────────────────────
+    ai_json: dict | None = None
+
+    if combined and ai_provider in ("hf", "ollama"):
+        tmpl_list = "\n".join(
+            f"  {t['id']}: {t['name']} — {t['description']}"
+            for t in INTERNAL_TEMPLATES
+        )
+        dim_hint = ""
+        # We'll fill dims after template is known; AI can suggest values
+        prompt = (
+            f"You are a 3D printing expert. Analyse this request and respond "
+            f"with ONLY a JSON object — no other text.\n\n"
+            f"Image caption: {caption or '(no image)'}\n"
+            f"User request: {description or '(no description)'}\n\n"
+            f"Available templates:\n{tmpl_list}\n\n"
+            f"Respond with this exact JSON structure:\n"
+            f'{{\n'
+            f'  "project_description": "one or two sentences describing the task",\n'
+            f'  "template_id": "exact id from the list above",\n'
+            f'  "suggested_dims": {{"dim_id": numeric_value, ...}}\n'
+            f'}}'
+        )
+
+        if ai_provider == "hf" and hf_token:
+            raw = _hf_chat(prompt, hf_token)
+        elif ai_provider == "ollama":
+            raw = _ollama_chat(prompt)
+        else:
+            raw = ""
+
+        if raw:
+            try:
+                clean = re.sub(r"```(?:json)?\n?", "", raw).strip().rstrip("`")
+                # Extract first {...} block
+                m = re.search(r"\{.*\}", clean, re.DOTALL)
+                if m:
+                    ai_json = json.loads(m.group())
+                    method  = ai_provider
+            except Exception:
+                ai_json = None
+
+    # ── Step 3: Build result ──────────────────────────────────────────────────
+    if ai_json:
+        tid      = ai_json.get("template_id", "")
+        template = tmpl_get(tid)
+        if not template:
+            # AI hallucinated an ID — fall back to keyword
+            ai_json = None
+
+    if not ai_json:
+        # Keyword fallback — always succeeds
+        tid  = _keyword_template(caption, description)
+        if not tid:
+            # Broaden: search by combined text
+            matches = tmpl_search(combined)
+            tid     = matches[0]["id"] if matches else INTERNAL_TEMPLATES[0]["id"]
+        template = tmpl_get(tid)
+        method   = "keyword"
+
+    template = template or INTERNAL_TEMPLATES[0]   # absolute fallback
+
+    if ai_json:
+        proj_desc = ai_json.get("project_description", "")
+        raw_dims  = ai_json.get("suggested_dims", {})
+        # Merge AI dims with template defaults (template wins on missing keys)
+        dims = _default_dims(template)
+        for did, val in raw_dims.items():
+            if did in dims:
+                dims[did] = str(val)
+    else:
+        proj_desc = _keyword_description(caption, description, template)
+        dims      = _default_dims(template)
+
+    return {
+        "caption":             caption,
+        "project_description": proj_desc or _keyword_description(caption, description, template),
+        "template_id":         template["id"],
+        "template_name":       template["name"],
+        "suggested_dims":      dims,
+        "method":              method,
+        "warning":             warning,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STEP 1 — INPUT  (photo + description → AI analysis)
+# ══════════════════════════════════════════════════════════════════════════════
+
+if st.session_state.wizard_step == "identify":
+
+    # ── Header ────────────────────────────────────────────────────────────────
+    st.markdown(
+        '<h2 style="color:#a8dadc;margin-bottom:4px">📸 Step 1 — Show us the part</h2>'
+        '<p style="color:#7a9ab8;font-size:13px;margin-bottom:16px">'
+        'Snap a photo and describe what you need — the AI does the rest.</p>',
+        unsafe_allow_html=True,
+    )
+
+    # ── Camera ────────────────────────────────────────────────────────────────
+    cam_key   = f"cam_{st.session_state.camera_counter}"
+    cam_photo = st.camera_input("📷 Take a photo of the part", key=cam_key)
+
+    if cam_photo is not None:
+        _bytes = cam_photo.getvalue()
+        _hash  = hashlib.md5(_bytes).hexdigest()
+        if _hash != st.session_state.last_cam_hash:
+            st.session_state.image_bytes      = _bytes
+            st.session_state.image_name       = f"photo_{st.session_state.camera_counter}.jpg"
+            st.session_state.image_media_type = "image/jpeg"
+            st.session_state.last_cam_hash    = _hash
+            st.session_state.camera_counter  += 1
+
+    # Show thumbnail if we have an image
+    if st.session_state.image_bytes:
+        _, thumb_col, _ = st.columns([1, 2, 1])
+        with thumb_col:
+            st.image(st.session_state.image_bytes, caption="📌 Active photo",
+                     use_container_width=True)
+            if st.button("✕ Remove photo", use_container_width=True):
+                st.session_state.image_bytes    = None
+                st.session_state.last_cam_hash  = ""
+                st.session_state.camera_counter += 1
+                st.rerun()
+
+    # ── Description ───────────────────────────────────────────────────────────
+    description = st.text_input(
+        "What do you need?",
+        value=st.session_state.vibe_description,
+        placeholder="e.g., replace knobs that are missing.",
+        label_visibility="visible",
+    )
+    st.session_state.vibe_description = description
+
+    st.divider()
+
+    # ── Analyse button ────────────────────────────────────────────────────────
+    has_input = bool(st.session_state.image_bytes or description.strip())
+
+    if not has_input:
+        st.caption("Add a photo and/or a description to continue.")
+
+    if st.button("🔍 Analyse & Find Best Match",
+                 type="primary",
+                 disabled=not has_input,
+                 use_container_width=True):
+
+        with st.spinner("Reading photo…"):
+            _result = analyze_input(
+                image_bytes  = st.session_state.image_bytes,
+                description  = description,
+                hf_token     = st.session_state.api_key,
+                ai_provider  = st.session_state.ai_provider,
+            )
+
+        st.session_state.identify_result  = _result
+        st.session_state.selected_template = tmpl_get(_result["template_id"])
+        st.session_state.dim_values        = _result["suggested_dims"]
+        _go("results")
+
+    # ── Optional AI settings (collapsed) ─────────────────────────────────────
+    with st.expander("⚙️ AI settings (optional — app works without these)"):
+        _provider = st.selectbox(
+            "AI provider",
+            ["none (keyword matching)", "hf (Hugging Face — free token)",
+             "ollama (local)"],
+            index=["none", "hf", "ollama"].index(
+                st.session_state.ai_provider
+                if st.session_state.ai_provider in ("none", "hf", "ollama")
+                else "none"
+            ),
+            key="_provider_sel",
+        )
+        st.session_state.ai_provider = _provider.split()[0]
+
+        if st.session_state.ai_provider == "hf":
+            _tok = st.text_input(
+                "Hugging Face token",
+                value=st.session_state.api_key,
+                type="password",
+                placeholder="hf_…",
+                help="Free token at huggingface.co/settings/tokens",
+            )
+            st.session_state.api_key = _tok
+        elif st.session_state.ai_provider == "ollama":
+            st.caption("Make sure `ollama serve` is running on localhost:11434 "
+                       "with the `llava` model pulled.")
+
+    st.stop()
