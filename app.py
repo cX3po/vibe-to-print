@@ -215,8 +215,10 @@ _DEFAULTS = {
     "hf_text_model":     ab.HF_TEXT_MODEL_DEFAULT,
     # Manual / Template mode
     "selected_template_id": None,   # template chosen in template browser
-    # UI widget states (reset on Start Over)
-    "camera_snap":          None,   # st.camera_input widget state
+    # Multi-photo capture
+    "captured_images":      [],     # list of {bytes, name, media_type}
+    "camera_counter":       0,      # incremented each snap to reset the widget
+    "last_cam_hash":        "",     # prevents double-processing same photo
     # Default AI provider (no-key mode for new users)
     "ai_provider":          "Manual (No AI — Template Mode)",
     # Dims fingerprint — detects if measurements changed after SCAD was generated
@@ -670,41 +672,101 @@ if phase == "vision" and _is_manual():
                         st.rerun()
 
 elif phase == "vision":
-    # ── Camera input (full-width, primary) ────────────────────────────────────
+    # ── Camera — resets widget key after each snap so user can keep adding ────
+    _cam_key = f"cam_{st.session_state.camera_counter}"
     camera_photo = st.camera_input(
-        "📸 Snap a photo",
-        key="camera_snap",
+        "📸 Snap a photo — tap to add more",
+        key=_cam_key,
         label_visibility="visible",
-        help="Opens your camera on mobile. Uses webcam on desktop.",
+        help="Each photo snapped is added to the gallery below. Tap again to add another.",
     )
 
-    # ── File upload (secondary, collapsed) ────────────────────────────────────
-    with st.expander("📁 Or upload an image file"):
-        uploaded = st.file_uploader(
-            "Image file",
+    # Auto-add newly snapped photo to captured_images list
+    if camera_photo is not None:
+        _cam_bytes = camera_photo.getvalue()
+        _cam_hash  = hashlib.md5(_cam_bytes).hexdigest()
+        if _cam_hash != st.session_state.last_cam_hash:
+            n = len(st.session_state.captured_images) + 1
+            st.session_state.captured_images.append({
+                "bytes":      _cam_bytes,
+                "name":       f"photo_{n}.jpg",
+                "media_type": "image/jpeg",
+            })
+            st.session_state.last_cam_hash  = _cam_hash
+            st.session_state.camera_counter += 1  # reset widget → blank for next snap
+            st.rerun()
+
+    # ── File upload (multiple files supported) ────────────────────────────────
+    with st.expander("📁 Upload image files (multiple OK)"):
+        uploaded_files = st.file_uploader(
+            "Images",
             type=["png", "jpg", "jpeg", "webp", "gif"],
+            accept_multiple_files=True,
             label_visibility="collapsed",
         )
+        if uploaded_files:
+            existing_hashes = {
+                hashlib.md5(ci["bytes"]).hexdigest()
+                for ci in st.session_state.captured_images
+            }
+            added = 0
+            for uf in uploaded_files:
+                ub = uf.getvalue()
+                if hashlib.md5(ub).hexdigest() not in existing_hashes:
+                    ext = Path(uf.name).suffix.lstrip(".").lower()
+                    st.session_state.captured_images.append({
+                        "bytes":      ub,
+                        "name":       uf.name,
+                        "media_type": {
+                            "png": "image/png", "jpg": "image/jpeg",
+                            "jpeg": "image/jpeg", "webp": "image/webp",
+                        }.get(ext, "image/jpeg"),
+                    })
+                    existing_hashes.add(hashlib.md5(ub).hexdigest())
+                    added += 1
+            if added:
+                st.rerun()
 
-    # ── Process whichever source has data ─────────────────────────────────────
-    img_source = camera_photo or uploaded
-    if img_source:
-        img_bytes = img_source.getvalue()
-        st.session_state.image_bytes = img_bytes
-        if camera_photo is not None and uploaded is None:
-            st.session_state.image_name       = "camera_snap.jpg"
-            st.session_state.image_media_type = "image/jpeg"
-        else:
-            st.session_state.image_name = uploaded.name
-            ext = Path(uploaded.name).suffix.lstrip(".").lower()
-            st.session_state.image_media_type = {
-                "png": "image/png", "jpg": "image/jpeg",
-                "jpeg": "image/jpeg", "webp": "image/webp", "gif": "image/gif",
-            }.get(ext, "image/jpeg")
-        st.image(img_bytes, use_container_width=True)
-    elif st.session_state.image_bytes:
-        st.image(st.session_state.image_bytes, use_container_width=True)
-        st.caption(f"📷 {st.session_state.image_name}")
+    # ── Photo gallery — thumbnails with remove buttons ─────────────────────────
+    imgs = st.session_state.captured_images
+    if imgs:
+        st.markdown(
+            f'<div style="font-size:13px;color:#52b788;font-weight:600;margin:4px 0">'
+            f'📷 {len(imgs)} photo{"s" if len(imgs)>1 else ""} attached'
+            f'{"  ·  📌 first = main for AI" if len(imgs)>1 else ""}'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+        # 3-up grid
+        n_cols = min(len(imgs), 3)
+        thumb_cols = st.columns(n_cols)
+        to_remove = None
+        for idx, ci in enumerate(imgs):
+            with thumb_cols[idx % n_cols]:
+                st.image(ci["bytes"], use_container_width=True)
+                label = "📌 Main" if idx == 0 else f"#{idx+1}"
+                c1, c2 = st.columns([2, 1])
+                c1.caption(label)
+                if c2.button("✕", key=f"rm_img_{idx}", help="Remove this photo"):
+                    to_remove = idx
+                if idx > 0 and st.button("↑ Make main", key=f"promote_{idx}",
+                                          use_container_width=True):
+                    # Move to front
+                    st.session_state.captured_images.insert(
+                        0, st.session_state.captured_images.pop(idx)
+                    )
+                    st.rerun()
+        if to_remove is not None:
+            st.session_state.captured_images.pop(to_remove)
+            st.rerun()
+
+        if st.button("🗑 Clear all photos", use_container_width=False):
+            st.session_state.captured_images = []
+            st.session_state.last_cam_hash   = ""
+            st.session_state.camera_counter += 1
+            st.rerun()
+
+    st.divider()
 
     # ── Describe the vibe ─────────────────────────────────────────────────────
     vibe = st.text_area(
@@ -736,18 +798,26 @@ elif phase == "vision":
         if dims_str:
             st.caption(f"Known size → {dims_str}")
 
+    # ── Derive primary image (first in gallery) ───────────────────────────────
+    if st.session_state.captured_images:
+        _primary = st.session_state.captured_images[0]
+        st.session_state.image_bytes      = _primary["bytes"]
+        st.session_state.image_name       = _primary["name"]
+        st.session_state.image_media_type = _primary["media_type"]
+
     # ── Action buttons ────────────────────────────────────────────────────────
     key_ok = bool(st.session_state.get("api_key")) or _needs_no_key()
     if not key_ok:
         st.warning("Add an API key in ⚙️ Advanced Settings → AI Brain.", icon="🔑")
 
+    has_image = bool(st.session_state.image_bytes)
     ds_on = st.session_state.get("ds_enabled", False)
 
     if ds_on:
         ds_btn = st.button(
             "🔍 Deep Search — Identify & Look Up Specs",
             type="primary",
-            disabled=not key_ok or not st.session_state.image_bytes,
+            disabled=not key_ok or not has_image,
         )
         if ds_btn:
             if not vibe.strip():
@@ -782,7 +852,7 @@ elif phase == "vision":
             st.error("Please describe the object first.")
             st.stop()
         img_b64 = (base64.standard_b64encode(st.session_state.image_bytes).decode()
-                   if st.session_state.image_bytes else None)
+                   if has_image else None)
         ref_hint = si.hint_text(st.session_state.get("ref_obj_key", "auto"))
         with st.spinner("AI is examining the object…"):
             try:
