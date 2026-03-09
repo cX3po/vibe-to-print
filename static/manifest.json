@@ -1,0 +1,21 @@
+{
+  "name": "Vibe-to-Print Engine",
+  "short_name": "Vibe-to-Print",
+  "description": "Turn a photo of any object into a 3D-printable file using AI.",
+  "start_url": ".",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#0d1b2a",
+  "theme_color": "#1d3557",
+  "categories": ["productivity", "utilities"],
+  "icons": [
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ],
+  "screenshots": [],
+  "lang": "en-US"
+}

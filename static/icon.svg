@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- Background tile -->
+  <rect width="512" height="512" rx="96" fill="#1d3557"/>
+
+  <!-- Printer body -->
+  <rect x="80" y="196" width="352" height="176" rx="24" fill="#3a78c9"/>
+
+  <!-- Paper input slot (top) -->
+  <rect x="164" y="120" width="184" height="100" rx="8" fill="#f0f8ff" opacity="0.9"/>
+  <rect x="164" y="120" width="184" height="12" rx="6" fill="#a8dadc"/>
+
+  <!-- Paper output (coming out bottom of printer) -->
+  <rect x="180" y="336" width="152" height="80" rx="6" fill="#f0f8ff" opacity="0.95"/>
+
+  <!-- Output slot line -->
+  <rect x="112" y="332" width="288" height="14" rx="7" fill="#1d3557"/>
+
+  <!-- Status light -->
+  <circle cx="420" cy="252" r="18" fill="#52b788"/>
+  <circle cx="420" cy="252" r="10" fill="#b7e4c7"/>
+
+  <!-- Paper line on output sheet -->
+  <rect x="204" y="368" width="104" height="6" rx="3" fill="#a8dadc" opacity="0.6"/>
+  <rect x="204" y="384" width="80"  height="6" rx="3" fill="#a8dadc" opacity="0.4"/>
+
+  <!-- Bottom accent bar -->
+  <rect x="80" y="428" width="352" height="20" rx="10" fill="#e94560"/>
+</svg>

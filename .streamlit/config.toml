@@ -1,0 +1,15 @@
+[server]
+# Serve the contents of the ./static folder at /app/static/
+# This provides the PWA manifest and icon files.
+enableStaticServing = true
+
+[browser]
+# Suppress the "Deploy this app" footer link (optional, cosmetic)
+gatherUsageStats = false
+
+[theme]
+base = "dark"
+primaryColor = "#e94560"
+backgroundColor = "#0d1b2a"
+secondaryBackgroundColor = "#10202e"
+textColor = "#e0f0ff"

@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.env
+*.env
+.streamlit/secrets.toml
+vibe_tmp*/
+*.gcode
+*.stl
+*.scad
+*.vtp.json
+.DS_Store
+Thumbs.db
