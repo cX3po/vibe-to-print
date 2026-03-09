@@ -927,6 +927,124 @@ def analyze_input(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# MARKET RESEARCH  — Buy vs. Print price comparison
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Estimated filament use and cost at ~$20/kg PLA (≈ $0.02/g)
+_PRINT_COST: dict[str, tuple[str, str]] = {
+    "Knobs & Controls":     ("12–18 g",  "$0.24–$0.36"),
+    "Enclosures & Boxes":   ("40–80 g",  "$0.80–$1.60"),
+    "Caps & Plugs":         ("4–8 g",    "$0.08–$0.16"),
+    "Brackets & Mounts":    ("15–25 g",  "$0.30–$0.50"),
+    "Cable Management":     ("6–10 g",   "$0.12–$0.20"),
+    "Hooks & Hangers":      ("12–20 g",  "$0.24–$0.40"),
+    "Fasteners & Hardware": ("2–5 g",    "$0.04–$0.10"),
+    "Furniture & Handles":  ("20–35 g",  "$0.40–$0.70"),
+}
+_PRINT_COST_DEFAULT = ("10–20 g", "< $0.50")
+
+_PRICE_RE = re.compile(
+    r'(?:[$£€])\s*\d{1,4}(?:\.\d{2})?'
+    r'|\d{1,4}(?:\.\d{2})?\s*(?:USD|GBP|EUR|dollars?)',
+    re.IGNORECASE,
+)
+
+
+def _market_search(part_name: str, category: str = "") -> dict:
+    """
+    Query DuckDuckGo Instant Answers for retail pricing on a part.
+
+    Returns:
+        abstract     : str        — DDG text (may be empty)
+        prices       : list[str]  — price strings found in abstract
+        buy_links    : list[dict] — [{site, url}, ...]
+        print_weight : str
+        print_cost   : str
+        error        : str        — non-fatal; empty on success
+    """
+    result: dict = {
+        "abstract":     "",
+        "prices":       [],
+        "buy_links":    [],
+        "print_weight": _PRINT_COST_DEFAULT[0],
+        "print_cost":   _PRINT_COST_DEFAULT[1],
+        "error":        "",
+    }
+
+    if category in _PRINT_COST:
+        result["print_weight"], result["print_cost"] = _PRINT_COST[category]
+
+    # ── DuckDuckGo Instant Answers ─────────────────────────────────────────
+    try:
+        r = requests.get(
+            "https://api.duckduckgo.com/",
+            params={
+                "q":             f"{part_name} replacement part buy price",
+                "format":        "json",
+                "no_html":       "1",
+                "skip_disambig": "1",
+            },
+            timeout=8,
+        )
+        r.raise_for_status()
+        ddg = r.json()
+        blob = (ddg.get("Abstract") or ddg.get("Answer") or "").strip()
+        for topic in ddg.get("RelatedTopics", [])[:6]:
+            if isinstance(topic, dict) and topic.get("Text"):
+                blob += " " + topic["Text"]
+        result["abstract"] = blob[:600]
+        found = _PRICE_RE.findall(blob)
+        result["prices"] = list(dict.fromkeys(found))[:4]
+    except requests.Timeout:
+        result["error"] = "Price search timed out — showing search links only."
+    except Exception as exc:
+        result["error"] = f"Search unavailable ({exc}) — showing search links."
+
+    # ── Pre-formed shopping search URLs (no API key required) ─────────────
+    q = urllib.parse.quote_plus(part_name)
+    result["buy_links"] = [
+        {"site": "Amazon",
+         "url":  f"https://www.amazon.com/s?k={q}"},
+        {"site": "eBay",
+         "url":  f"https://www.ebay.com/sch/i.html?_nkw={q}"},
+        {"site": "RepairClinic",
+         "url":  f"https://www.repairclinic.com/Search?q={q}"},
+        {"site": "ApplianceParts",
+         "url":  f"https://www.appliancepartspros.com/search?q={q}"},
+    ]
+    return result
+
+
+def _vibe_message(prices: list[str], print_cost: str) -> str:
+    """Return the context-aware 'should I print?' nudge."""
+    if not prices:
+        return (
+            f"Original parts can cost $10–$50+ and take days to ship. "
+            f"Print a custom version right now for {print_cost} in filament."
+        )
+    raw = prices[0]
+    digits = re.sub(r"[^0-9.]", "", raw.split()[0])
+    try:
+        val = float(digits)
+    except ValueError:
+        return f"Print a custom fit for just {print_cost} instead of waiting for a delivery."
+    if val < 5:
+        return (
+            f"The original part is only **{raw}** — printing may save time more than money, "
+            f"but you'll get a perfect custom fit either way."
+        )
+    if val < 25:
+        return (
+            f"The original part runs **{raw}** and likely takes days to ship. "
+            f"Print a custom version right now for {print_cost} in filament."
+        )
+    return (
+        f"At **{raw}** for the original (plus shipping), printing your own saves serious cash "
+        f"— and you get an exact fit, not a generic replacement."
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # STEP 1 — INPUT  (photo + description → AI analysis)
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -1466,128 +1584,6 @@ def _caliper_tips_html(template_id: str) -> str:
         f"<ul style='padding-left:18px;margin:0;font-size:14px'>"
         f"{items}</ul>"
     )
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# MARKET RESEARCH  — Buy vs. Print price comparison
-# ══════════════════════════════════════════════════════════════════════════════
-
-# Estimated filament use and cost at ~$20/kg PLA (≈ $0.02/g)
-_PRINT_COST: dict[str, tuple[str, str]] = {
-    "Knobs & Controls":     ("12–18 g",  "$0.24–$0.36"),
-    "Enclosures & Boxes":   ("40–80 g",  "$0.80–$1.60"),
-    "Caps & Plugs":         ("4–8 g",    "$0.08–$0.16"),
-    "Brackets & Mounts":    ("15–25 g",  "$0.30–$0.50"),
-    "Cable Management":     ("6–10 g",   "$0.12–$0.20"),
-    "Hooks & Hangers":      ("12–20 g",  "$0.24–$0.40"),
-    "Fasteners & Hardware": ("2–5 g",    "$0.04–$0.10"),
-    "Furniture & Handles":  ("20–35 g",  "$0.40–$0.70"),
-}
-_PRINT_COST_DEFAULT = ("10–20 g", "< $0.50")
-
-_PRICE_RE = re.compile(
-    r'(?:[$£€])\s*\d{1,4}(?:\.\d{2})?'
-    r'|\d{1,4}(?:\.\d{2})?\s*(?:USD|GBP|EUR|dollars?)',
-    re.IGNORECASE,
-)
-
-
-def _market_search(part_name: str, category: str = "") -> dict:
-    """
-    Query DuckDuckGo Instant Answers for retail pricing on a part.
-
-    Returns:
-        abstract     : str        — DDG text (may be empty)
-        prices       : list[str]  — price strings found in abstract
-        buy_links    : list[dict] — [{site, url}, ...]
-        print_weight : str
-        print_cost   : str
-        error        : str        — non-fatal; empty on success
-    """
-    result: dict = {
-        "abstract":     "",
-        "prices":       [],
-        "buy_links":    [],
-        "print_weight": _PRINT_COST_DEFAULT[0],
-        "print_cost":   _PRINT_COST_DEFAULT[1],
-        "error":        "",
-    }
-
-    if category in _PRINT_COST:
-        result["print_weight"], result["print_cost"] = _PRINT_COST[category]
-
-    # ── DuckDuckGo Instant Answers ─────────────────────────────────────────
-    try:
-        r = requests.get(
-            "https://api.duckduckgo.com/",
-            params={
-                "q":             f"{part_name} replacement part buy price",
-                "format":        "json",
-                "no_html":       "1",
-                "skip_disambig": "1",
-            },
-            timeout=8,
-        )
-        r.raise_for_status()
-        ddg = r.json()
-        blob = (ddg.get("Abstract") or ddg.get("Answer") or "").strip()
-        # Also sweep related topic snippets for price mentions
-        for topic in ddg.get("RelatedTopics", [])[:6]:
-            if isinstance(topic, dict) and topic.get("Text"):
-                blob += " " + topic["Text"]
-        result["abstract"] = blob[:600]          # cap for display
-        found = _PRICE_RE.findall(blob)
-        result["prices"] = list(dict.fromkeys(found))[:4]   # deduplicate
-    except requests.Timeout:
-        result["error"] = "Price search timed out — showing search links only."
-    except Exception as exc:
-        result["error"] = f"Search unavailable ({exc}) — showing search links."
-
-    # ── Pre-formed shopping search URLs (no API key required) ─────────────
-    q = urllib.parse.quote_plus(part_name)
-    result["buy_links"] = [
-        {"site": "Amazon",
-         "url":  f"https://www.amazon.com/s?k={q}"},
-        {"site": "eBay",
-         "url":  f"https://www.ebay.com/sch/i.html?_nkw={q}"},
-        {"site": "RepairClinic",
-         "url":  f"https://www.repairclinic.com/Search?q={q}"},
-        {"site": "ApplianceParts",
-         "url":  f"https://www.appliancepartspros.com/search?q={q}"},
-    ]
-    return result
-
-
-# ── Vibe decision message ─────────────────────────────────────────────────────
-
-def _vibe_message(prices: list[str], print_cost: str) -> str:
-    """Return the context-aware 'should I print?' nudge."""
-    if not prices:
-        return (
-            f"Original parts can cost $10–$50+ and take days to ship. "
-            f"Print a custom version right now for {print_cost} in filament."
-        )
-    raw = prices[0]
-    digits = re.sub(r"[^0-9.]", "", raw.split()[0])
-    try:
-        val = float(digits)
-    except ValueError:
-        return f"Print a custom fit for just {print_cost} instead of waiting for a delivery."
-    if val < 5:
-        return (
-            f"The original part is only **{raw}** — printing may save time more than money, "
-            f"but you'll get a perfect custom fit either way."
-        )
-    if val < 25:
-        return (
-            f"The original part runs **{raw}** and likely takes days to ship. "
-            f"Print a custom version right now for {print_cost} in filament."
-        )
-    return (
-        f"At **{raw}** for the original (plus shipping), printing your own saves serious cash "
-        f"— and you get an exact fit, not a generic replacement."
-    )
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 # STEP 2 — VALIDATE & REFINE  (wizard_step == "results")
