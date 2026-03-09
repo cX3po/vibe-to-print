@@ -25,6 +25,7 @@ import template_library as tl
 import transfer         as tr
 import viewer3d         as v3d
 import hf_identify      as hfi
+import web_search       as ws
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Page config & mobile-first CSS
@@ -230,6 +231,10 @@ _DEFAULTS = {
     "_blip_warn":           "",
     "_blip_query":          "",
     "_blip_no_match":       False,
+    # In-app search results
+    "_search_result":       None,   # ws.SearchResult or None
+    "_search_dims_raw":     "",     # raw HF JSON for dim suggestions
+    "_search_done":         False,
 }
 
 for k, v in _DEFAULTS.items():
@@ -757,152 +762,217 @@ if phase == "vision":
 
     if _is_manual():
         # ══════════════════════════════════════════════════════════════════════
-        # TIER 1 — Free photo identification (BLIP via HF, no account needed)
+        # TIER 1 — In-app research: BLIP photo AI + DDG + Wikipedia
         # ══════════════════════════════════════════════════════════════════════
-        st.markdown(
-            '<div style="font-size:13px;color:#7a9ab8;margin-bottom:6px">'
-            '📷 Photo + description → instant part identification, no account needed'
-            '</div>',
-            unsafe_allow_html=True,
+        _btn_cols = st.columns([3, 1])
+        _do_identify = _btn_cols[0].button(
+            "🔍 Identify & Research",
+            type="primary",
+            disabled=not (has_image or vibe.strip()),
+            use_container_width=True,
+        )
+        _do_dims = _btn_cols[1].button(
+            "📐 Suggest dims",
+            disabled=not st.session_state.get("_search_done"),
+            use_container_width=True,
+            help="Uses HF text model to suggest measurements from the research above "
+                 "(free HF token recommended)",
         )
 
-        if st.button("🔍 Identify & Suggest Measurements",
-                     type="primary",
-                     disabled=not (has_image or vibe.strip()),
-                     use_container_width=True):
+        if _do_identify:
+            st.session_state["_blip_caption"]    = ""
+            st.session_state["_blip_warn"]       = ""
+            st.session_state["_search_result"]   = None
+            st.session_state["_search_dims_raw"] = ""
+            st.session_state["_search_done"]     = False
 
-            _caption = ""
-            _warn    = ""
-
-            # Step 1 — BLIP image caption (free, anonymous HF)
+            # Step 1 — BLIP photo caption
             if has_image:
-                with st.spinner("Analyzing photo with free AI…"):
+                with st.spinner("Reading photo…"):
                     try:
-                        _caption = hfi.caption_image(
+                        _cap = hfi.caption_image(
                             st.session_state.image_bytes,
                             hf_token=st.session_state.get("api_key", ""),
                         )
+                        st.session_state["_blip_caption"] = _cap
                     except RuntimeError as _e:
-                        _warn = str(_e)
+                        st.session_state["_blip_warn"] = str(_e)
 
-            # Step 2 — search templates using caption + description
-            _query      = f"{_caption} {vibe}".strip()
-            _kw_matches = tl.search(_query, "") if _query else []
+            # Step 2 — DDG + Wikipedia in-app search
+            _caption = st.session_state.get("_blip_caption", "")
+            with st.spinner("Searching DuckDuckGo + Wikipedia…"):
+                _sr = ws.search_object(_caption, vibe)
+            st.session_state["_search_result"] = _sr
+            st.session_state["_search_done"]   = True
+            st.rerun()
 
-            # Store caption so we can show it even after rerun
-            st.session_state["_blip_caption"] = _caption
-            st.session_state["_blip_warn"]    = _warn
-            st.session_state["_blip_query"]   = _query
+        # ── Display search results ────────────────────────────────────────────
+        _sr: ws.SearchResult | None = st.session_state.get("_search_result")
 
-            if _kw_matches:
-                _best = _kw_matches[0]
-                _t    = tl.get(_best["id"])
-                st.session_state.selected_template_id = _best["id"]
-                st.session_state.required_dims = [
-                    {
-                        "id":       d["id"],
-                        "question": d["question"],
-                        "prefill":  str(d["default"]),
-                    }
-                    for d in _t["dims"]
-                ]
-                st.session_state.vibe_description = vibe
-                _src = f"Photo AI + description" if _caption else "Description"
-                st.session_state.object_summary = (
-                    f"**{_best['name']}** — {_best['description']}\n\n"
-                    f"*Source: {_src}. Review and adjust measurements below.*"
+        if _sr is not None:
+            _caption = st.session_state.get("_blip_caption", "")
+            if _caption:
+                st.info(f"📷 Photo AI says: *\"{_caption}\"*")
+            if st.session_state.get("_blip_warn"):
+                st.warning(st.session_state["_blip_warn"])
+
+            if _sr.has_content():
+                if _sr.ddg_answer:
+                    st.success(f"**Quick answer:** {_sr.ddg_answer}")
+
+                if _sr.ddg_abstract:
+                    with st.expander(f"🌐 DuckDuckGo — definition", expanded=True):
+                        st.markdown(_sr.ddg_abstract)
+
+                if _sr.wiki_extract:
+                    with st.expander(
+                        f"📖 Wikipedia — {_sr.wiki_title}", expanded=not _sr.ddg_abstract
+                    ):
+                        st.markdown(_sr.wiki_extract)
+
+                if _sr.dimensions:
+                    with st.expander(
+                        f"📐 {len(_sr.dimensions)} dimension mention"
+                        f"{'s' if len(_sr.dimensions) != 1 else ''} found in results",
+                        expanded=True,
+                    ):
+                        for d in _sr.dimensions:
+                            st.markdown(
+                                f"- **{d['value']} {d['unit']}** — "
+                                f"<span style='color:#7a9ab8;font-size:12px'>"
+                                f"{d['context']}</span>",
+                                unsafe_allow_html=True,
+                            )
+            elif not _caption:
+                st.warning(
+                    "No results found. Try a more specific description "
+                    "or add a photo.",
+                    icon="🔎",
                 )
-                if _caption:
-                    st.session_state.object_summary = (
-                        f"📷 Photo AI says: *\"{_caption}\"*\n\n"
-                        + st.session_state.object_summary
-                    )
-                reset_to("dimensions")
-                st.rerun()
-            else:
-                # No match — stay on page, show fallback options below
-                st.session_state["_blip_no_match"] = True
 
-        # Show any caption / warning from the last identify attempt
-        if st.session_state.get("_blip_caption"):
-            st.info(f"📷 Photo AI sees: *\"{st.session_state['_blip_caption']}\"*")
-        if st.session_state.get("_blip_warn"):
-            st.warning(st.session_state["_blip_warn"])
-        if st.session_state.get("_blip_no_match"):
-            st.warning(
-                "No matching template found — try the search options below "
-                "or rephrase your description.",
-                icon="🔎",
-            )
-            st.session_state["_blip_no_match"] = False  # reset so it doesn't persist
+            # ── Try to match a template from research ─────────────────────────
+            _query   = f"{_caption} {vibe}".strip()
+            _matches = tl.search(_query, "") if _query else []
+            if _matches:
+                _best = _matches[0]
+                st.markdown(
+                    f'<div style="background:#0d2137;border:1px solid #2d4a60;'
+                    f'border-radius:8px;padding:10px 14px;margin:8px 0">'
+                    f'<span style="color:#52b788;font-weight:700">✓ Best template match: '
+                    f'</span><span style="color:#e0f0ff">{_best["name"]}</span>'
+                    f'<span style="color:#7a9ab8;font-size:12px"> — {_best["description"]}'
+                    f'</span></div>',
+                    unsafe_allow_html=True,
+                )
+                if st.button("Use this template →", type="primary",
+                             use_container_width=True, key="use_template_from_search"):
+                    _t = tl.get(_best["id"])
+                    st.session_state.selected_template_id = _best["id"]
+                    st.session_state.required_dims = [
+                        {"id": d["id"], "question": d["question"], "prefill": str(d["default"])}
+                        for d in _t["dims"]
+                    ]
+                    st.session_state.vibe_description = vibe
+                    st.session_state.object_summary   = (
+                        f"📷 *\"{_caption}\"*\n\n"
+                        f"**{_best['name']}** — {_best['description']}"
+                    ) if _caption else f"**{_best['name']}** — {_best['description']}"
+                    reset_to("dimensions")
+                    st.rerun()
+
+        # ── Suggest dims button result ────────────────────────────────────────
+        if _do_dims and _sr is not None:
+            _context = _sr.full_text()
+            with st.spinner("Asking HF to suggest measurements…"):
+                try:
+                    _raw = hfi.suggest_dimensions_from_context(
+                        caption     = st.session_state.get("_blip_caption", ""),
+                        description = vibe,
+                        search_context = _context,
+                        hf_token    = st.session_state.get("api_key", ""),
+                    )
+                    st.session_state["_search_dims_raw"] = _raw
+                except RuntimeError as _e:
+                    st.warning(str(_e))
+
+        # Show HF dimension suggestions
+        _raw_dims = st.session_state.get("_search_dims_raw", "")
+        if _raw_dims:
+            import json as _json, re as _re
+            try:
+                _clean = _re.sub(r"```(?:json)?\n?", "", _raw_dims).strip().rstrip("`")
+                _suggested = _json.loads(_clean)
+                if isinstance(_suggested, list) and _suggested:
+                    st.markdown("#### 📐 AI-suggested measurements")
+                    st.caption(
+                        "These are estimates based on web research — "
+                        "verify with a caliper before printing."
+                    )
+                    # Build required_dims from suggestions and go to dimensions phase
+                    if st.button("✓ Use these measurements →", type="primary",
+                                 use_container_width=True):
+                        st.session_state.required_dims = [
+                            {
+                                "id":               _re.sub(r"\W+", "_", d.get("name", f"dim_{i}")).lower(),
+                                "question":         d.get("name", f"Dimension {i+1}") + " (mm)",
+                                "prefill":          str(d.get("value", "")),
+                                "estimated_value":  str(d.get("value", "")),
+                                "estimation_confidence": d.get("confidence", "low"),
+                                "estimation_source": "Web research + HF AI",
+                            }
+                            for i, d in enumerate(_suggested)
+                        ]
+                        st.session_state.vibe_description = vibe
+                        st.session_state.object_summary   = (
+                            f"From web research: {st.session_state.get('_blip_caption','')} "
+                            f"— {vibe}"
+                        )
+                        reset_to("dimensions")
+                        st.rerun()
+                    for d in _suggested:
+                        conf_color = {
+                            "high": "#52b788", "medium": "#f4a261", "low": "#e76f51"
+                        }.get(str(d.get("confidence", "low")).split()[0].lower(), "#7a9ab8")
+                        st.markdown(
+                            f'<div style="display:flex;justify-content:space-between;'
+                            f'padding:4px 0;border-bottom:1px solid #1d3557">'
+                            f'<span style="color:#e0f0ff">{d.get("name","?")}</span>'
+                            f'<span style="color:{conf_color};font-weight:700">'
+                            f'{d.get("value","?")} {d.get("unit","mm")}</span>'
+                            f'</div>',
+                            unsafe_allow_html=True,
+                        )
+            except (_json.JSONDecodeError, Exception):
+                st.text(_raw_dims)   # show raw if parsing fails
 
         st.divider()
 
         # ══════════════════════════════════════════════════════════════════════
-        # TIER 2 — Web search fallback (Google Lens + text search)
-        # ══════════════════════════════════════════════════════════════════════
-        with st.expander("🌐 Search the web for more info"):
-            _urls = hfi.make_search_urls(
-                vibe,
-                caption=st.session_state.get("_blip_caption", ""),
-            )
-            st.caption(
-                "Download the photo then open Google Lens — or run a web search "
-                "to find dimensions for your part."
-            )
-
-            _col1, _col2 = st.columns(2)
-            with _col1:
-                if has_image:
-                    st.download_button(
-                        "⬇ Download photo",
-                        data=st.session_state.image_bytes,
-                        file_name="identify_me.jpg",
-                        mime="image/jpeg",
-                        use_container_width=True,
-                    )
-                st.link_button(
-                    "🔍 Open Google Lens",
-                    _urls["google_lens"],
-                    use_container_width=True,
-                )
-            with _col2:
-                st.link_button(
-                    "🌐 Google search",
-                    _urls["google"],
-                    use_container_width=True,
-                )
-                st.link_button(
-                    "🔎 Bing search",
-                    _urls["bing"],
-                    use_container_width=True,
-                )
-
-        # ══════════════════════════════════════════════════════════════════════
-        # TIER 3 — Hook up smarter AI (HF token / local AI)
+        # TIER 2 — Smarter AI options
         # ══════════════════════════════════════════════════════════════════════
         with st.expander("🤖 Get smarter results — connect an AI"):
             st.markdown("""
-**Option A — Free Hugging Face account**
-Get a free token at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens)
-→ Paste it in **⚙️ Advanced Settings → AI Brain**
-→ Higher rate limits + better vision models
+**Option A — Free Hugging Face token** *(recommended)*
+Unlocks better vision models + higher rate limits for the Identify button.
+1. Sign up free at [huggingface.co](https://huggingface.co)
+2. Get a token → [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens)
+3. Paste it in **⚙️ Advanced Settings → AI Brain**
 
 ---
 
-**Option B — Local AI (Ollama) — works offline, completely private**
+**Option B — Local AI (Ollama) — offline, private, no cost**
 1. Install [Ollama](https://ollama.ai) on your computer or home server
-2. Run: `ollama pull llava` (vision model)
+2. Run: `ollama pull llava`
 3. Select **Local (Ollama)** in ⚙️ Advanced Settings
-4. Works on any device on the same network — no API key, no data sent to cloud
+4. Works from your phone over Wi-Fi — no cloud, no key
 
 ---
 
-**Option C — Use any AI chatbot you already have**
-If you have ChatGPT, Claude, Gemini, or a phone AI app:
-1. Download your photo (button above)
-2. Ask: *"What is this? What measurements would I need to 3D print a replacement?"*
-3. Paste the answer into the description and tap Identify again
+**Option C — Any AI app you already have**
+ChatGPT, Claude, Gemini, phone AI apps:
+1. Download your photo, share it with the AI
+2. Ask: *"What is this? List the measurements I'd need to 3D print it (in mm)."*
+3. Paste the answer into the description above and tap **Identify & Research** again
 """)
 
         # ── Browse templates manually (last resort) ───────────────────────────

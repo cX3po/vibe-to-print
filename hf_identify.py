@@ -79,6 +79,63 @@ def caption_image(image_bytes: bytes, hf_token: str = "") -> str:
         return ""
 
 
+def suggest_dimensions_from_context(
+    caption: str,
+    description: str,
+    search_context: str,
+    hf_token: str = "",
+) -> str:
+    """
+    Feed BLIP caption + DDG/Wikipedia context to an HF text model and ask it
+    to return structured dimension suggestions as JSON.
+
+    Returns raw model response (JSON string).  Caller parses it.
+    Raises RuntimeError on failure.
+    """
+    try:
+        from huggingface_hub import InferenceClient
+    except ImportError:
+        raise RuntimeError("huggingface_hub not installed.")
+
+    _TEXT_MODEL = "mistralai/Mistral-7B-Instruct-v0.3"
+
+    system = (
+        "You are a mechanical engineering expert specialising in 3D printing. "
+        "Given a description of a physical object plus reference information, "
+        "output ONLY a JSON array of dimension suggestions — no other text.\n"
+        'Format: [{"name":"Outer diameter","value":"25","unit":"mm","confidence":"medium"}]'
+    )
+    user = (
+        f"Object (from photo AI): {caption}\n"
+        f"User description: {description}\n"
+        f"Reference info:\n{search_context[:1200]}\n\n"
+        "List 3–8 key dimensions needed to 3D-print this object. "
+        "Use the reference info where possible. Mark confidence as high/medium/low/estimated."
+    )
+
+    token  = hf_token or None
+    client = InferenceClient(token=token)
+    try:
+        resp = client.chat_completion(
+            model=_TEXT_MODEL,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user",   "content": user},
+            ],
+            max_tokens=512,
+        )
+        return (resp.choices[0].message.content or "").strip()
+    except Exception as exc:
+        err = str(exc)
+        if "429" in err or "rate" in err.lower():
+            raise RuntimeError(
+                "HF rate limit — add a free token at huggingface.co/settings/tokens"
+            )
+        if "503" in err or "loading" in err.lower():
+            raise RuntimeError("HF model warming up — try again in 20 s.")
+        raise RuntimeError(f"HF text model error: {exc}")
+
+
 def make_search_urls(description: str, caption: str = "") -> dict[str, str]:
     """
     Build web-search and Google Lens URLs pre-filled with the
