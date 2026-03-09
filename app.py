@@ -714,102 +714,169 @@ if phase == "vision":
         st.session_state.image_name       = _primary["name"]
         st.session_state.image_media_type = _primary["media_type"]
 
-    if _is_manual():
-        # ── MANUAL MODE — Template browser ───────────────────────────────────
-        st.subheader("Choose a Template")
-        st.caption(
-            "Browse the built-in library. Select a template, fill in your measurements, "
-            "and generate parametric OpenSCAD without any AI or API key."
+    # ── Describe — always visible in all modes ───────────────────────────────
+    vibe = st.text_area(
+        "Describe what you want to make",
+        value=st.session_state.vibe_description,
+        height=90,
+        placeholder="e.g. Broken stove knob — D-shaft 6 mm, chunky grip  "
+                    "or  Wall bracket for 32mm pipe",
+    )
+    st.session_state.vibe_description = vibe
+
+    # ── Scale reference + tips (tucked away) ──────────────────────────────────
+    with st.expander("📐 Scale reference & tips (optional)"):
+        st.markdown(si.tip_card_html(), unsafe_allow_html=True)
+        all_ref_labels = si.all_ui_labels()
+        default_ref_idx = (all_ref_labels.index("Credit / debit card")
+                           if "Credit / debit card" in all_ref_labels else 0)
+        ref_label = st.selectbox(
+            "Reference object in photo",
+            options=all_ref_labels,
+            index=default_ref_idx,
+            key="ref_label_selector",
         )
+        ref_key = si.key_for_label(ref_label)
+        st.session_state.ref_obj_key = ref_key
+        ref_entry = si.REFERENCE_DB.get(ref_key, {})
+        dims_str  = " · ".join(
+            f"{k}: **{v} mm**" for k, v in ref_entry.get("dims", {}).items()
+        )
+        if dims_str:
+            st.caption(f"Known size → {dims_str}")
 
-        search_col, cat_col = st.columns([3, 1], gap="medium")
-        with search_col:
-            q = st.text_input("Search templates", placeholder="knob  /  box  /  bracket  …",
-                              key="tl_search_query")
-        with cat_col:
-            cats = ["All"] + tl.CATEGORIES
-            cat  = st.selectbox("Category", cats, key="tl_category")
+    has_image = bool(st.session_state.image_bytes)
+    key_ok    = bool(st.session_state.get("api_key")) or _needs_no_key()
 
-        matches = tl.search(q, cat if cat != "All" else "")
-        if not matches:
-            st.warning("No templates match your search — try a different keyword.")
-        else:
-            st.caption(f"{len(matches)} template{'s' if len(matches) != 1 else ''} found")
-            for row_start in range(0, len(matches), 2):
-                c1, c2 = st.columns(2, gap="medium")
-                for col, tmpl in zip((c1, c2), matches[row_start:row_start + 2]):
-                    with col:
-                        selected = st.session_state.selected_template_id == tmpl["id"]
-                        border   = "#52b788" if selected else "#1d3557"
-                        bg       = "rgba(45,106,79,0.15)" if selected else "#10202e"
-                        st.markdown(
-                            f'<div style="background:{bg};border:2px solid {border};'
-                            f'border-radius:10px;padding:12px 14px;margin-bottom:4px">'
-                            f'<div style="font-weight:700;color:#a8dadc;font-size:16px">'
-                            f'{tmpl["name"]}</div>'
-                            f'<div style="color:#7a9ab8;font-size:12px;margin:2px 0 6px">'
-                            f'{tmpl["category"]}</div>'
-                            f'<div style="color:#cdd8e0;font-size:13px">'
-                            f'{tmpl["description"]}</div>'
-                            f'</div>',
-                            unsafe_allow_html=True,
+    if _is_manual():
+        # ── NO-AI PATH: smart keyword search → template suggestion ────────────
+        if not key_ok:
+            st.info(
+                "No API key needed — tap **Identify & Suggest** and we'll find the "
+                "closest template from your description.",
+                icon="💡",
+            )
+
+        if st.button("🔍 Identify & Suggest Measurements",
+                     type="primary",
+                     disabled=not vibe.strip(),
+                     use_container_width=True):
+            # Try AI first if a non-manual provider + key happens to be configured
+            _provider = st.session_state.get("ai_provider", ab.PROVIDER_MANUAL)
+            _has_key  = bool(st.session_state.get("api_key")) or _provider in (
+                ab.PROVIDER_OLLAMA, ab.PROVIDER_HF
+            )
+            _use_ai   = (_provider != ab.PROVIDER_MANUAL) and _has_key
+
+            if _use_ai:
+                img_b64  = (base64.standard_b64encode(st.session_state.image_bytes).decode()
+                            if has_image else None)
+                ref_hint = si.hint_text(st.session_state.get("ref_obj_key", "auto"))
+                with st.spinner("AI is identifying the object…"):
+                    try:
+                        brain = _get_brain()
+                        summary, dims, scale_meta = brain.extract_dimensions(
+                            img_b64, st.session_state.image_media_type, vibe,
+                            active_p["name"], material, reference_hint=ref_hint,
                         )
-                        btn_lbl = "✓ Selected" if selected else "Use this template"
-                        btn_type = "primary" if selected else "secondary"
-                        if st.button(btn_lbl, key=f"sel_{tmpl['id']}",
-                                     use_container_width=True, type=btn_type):
-                            st.session_state.selected_template_id = tmpl["id"]
-                            t = tl.get(tmpl["id"])
-                            st.session_state.required_dims = [
-                                {
-                                    "id":       d["id"],
-                                    "question": d["question"],
-                                    "prefill":  str(d["default"]),
-                                }
-                                for d in t["dims"]
-                            ]
-                            st.session_state.vibe_description = t["name"]
-                            st.session_state.object_summary   = t["description"]
-                            reset_to("dimensions")
-                            st.rerun()
+                    except Exception as exc:
+                        st.error(f"AI error: {exc}")
+                        st.stop()
+                if not dims:
+                    st.error("AI returned no dimensions. Try rephrasing.")
+                    st.stop()
+                st.session_state.object_summary = summary
+                st.session_state.required_dims  = dims
+                st.session_state.scale_meta     = scale_meta
+                reset_to("dimensions")
+                st.rerun()
+            else:
+                # Keyword match against template library
+                _kw_matches = tl.search(vibe, "")
+                if not _kw_matches:
+                    st.warning(
+                        "No matching template found. Try different keywords or "
+                        "browse templates below.",
+                        icon="🔎",
+                    )
+                else:
+                    _best = _kw_matches[0]
+                    _t    = tl.get(_best["id"])
+                    st.session_state.selected_template_id = _best["id"]
+                    st.session_state.required_dims = [
+                        {
+                            "id":       d["id"],
+                            "question": d["question"],
+                            "prefill":  str(d["default"]),
+                        }
+                        for d in _t["dims"]
+                    ]
+                    st.session_state.vibe_description = vibe
+                    st.session_state.object_summary   = (
+                        f"Suggested match: **{_best['name']}** — {_best['description']}\n\n"
+                        f"Review and adjust the measurements below."
+                    )
+                    reset_to("dimensions")
+                    st.rerun()
+
+        # ── Browse templates manually (secondary, tucked away) ────────────────
+        with st.expander("📚 Browse templates manually"):
+            search_col, cat_col = st.columns([3, 1], gap="medium")
+            with search_col:
+                q = st.text_input("Search", placeholder="knob  /  box  /  bracket  …",
+                                  key="tl_search_query")
+            with cat_col:
+                cats = ["All"] + tl.CATEGORIES
+                cat  = st.selectbox("Category", cats, key="tl_category")
+
+            matches = tl.search(q, cat if cat != "All" else "")
+            if not matches:
+                st.warning("No templates match.")
+            else:
+                st.caption(f"{len(matches)} template{'s' if len(matches) != 1 else ''} found")
+                for row_start in range(0, len(matches), 2):
+                    c1, c2 = st.columns(2, gap="medium")
+                    for col, tmpl in zip((c1, c2), matches[row_start:row_start + 2]):
+                        with col:
+                            selected = st.session_state.selected_template_id == tmpl["id"]
+                            border   = "#52b788" if selected else "#1d3557"
+                            bg       = "rgba(45,106,79,0.15)" if selected else "#10202e"
+                            st.markdown(
+                                f'<div style="background:{bg};border:2px solid {border};'
+                                f'border-radius:10px;padding:12px 14px;margin-bottom:4px">'
+                                f'<div style="font-weight:700;color:#a8dadc;font-size:16px">'
+                                f'{tmpl["name"]}</div>'
+                                f'<div style="color:#7a9ab8;font-size:12px;margin:2px 0 6px">'
+                                f'{tmpl["category"]}</div>'
+                                f'<div style="color:#cdd8e0;font-size:13px">'
+                                f'{tmpl["description"]}</div>'
+                                f'</div>',
+                                unsafe_allow_html=True,
+                            )
+                            btn_lbl = "✓ Selected" if selected else "Use this template"
+                            btn_type = "primary" if selected else "secondary"
+                            if st.button(btn_lbl, key=f"sel_{tmpl['id']}",
+                                         use_container_width=True, type=btn_type):
+                                st.session_state.selected_template_id = tmpl["id"]
+                                t = tl.get(tmpl["id"])
+                                st.session_state.required_dims = [
+                                    {
+                                        "id":       d["id"],
+                                        "question": d["question"],
+                                        "prefill":  str(d["default"]),
+                                    }
+                                    for d in t["dims"]
+                                ]
+                                st.session_state.vibe_description = vibe or t["name"]
+                                st.session_state.object_summary   = t["description"]
+                                reset_to("dimensions")
+                                st.rerun()
 
     else:
-        # ── AI MODE — Describe + Analyse ──────────────────────────────────────
-        vibe = st.text_area(
-            "What is this? What should it do?",
-            value=st.session_state.vibe_description,
-            height=90,
-            placeholder="e.g. Broken stove knob — D-shaft 6 mm, chunky with ridges",
-        )
-        st.session_state.vibe_description = vibe
-
-        # ── Scale reference + tips (tucked away) ──────────────────────────────
-        with st.expander("📐 Scale reference & tips (optional)"):
-            st.markdown(si.tip_card_html(), unsafe_allow_html=True)
-            all_ref_labels = si.all_ui_labels()
-            default_ref_idx = (all_ref_labels.index("Credit / debit card")
-                               if "Credit / debit card" in all_ref_labels else 0)
-            ref_label = st.selectbox(
-                "Reference object in photo",
-                options=all_ref_labels,
-                index=default_ref_idx,
-                key="ref_label_selector",
-            )
-            ref_key = si.key_for_label(ref_label)
-            st.session_state.ref_obj_key = ref_key
-            ref_entry = si.REFERENCE_DB.get(ref_key, {})
-            dims_str  = " · ".join(
-                f"{k}: **{v} mm**" for k, v in ref_entry.get("dims", {}).items()
-            )
-            if dims_str:
-                st.caption(f"Known size → {dims_str}")
-
-        # ── Action buttons ─────────────────────────────────────────────────────
-        key_ok = bool(st.session_state.get("api_key")) or _needs_no_key()
+        # ── AI MODE — Analyse with configured provider ────────────────────────
         if not key_ok:
             st.warning("Add an API key in ⚙️ Advanced Settings → AI Brain.", icon="🔑")
 
-        has_image = bool(st.session_state.image_bytes)
         ds_on = st.session_state.get("ds_enabled", False)
 
         if ds_on:
@@ -817,6 +884,7 @@ if phase == "vision":
                 "🔍 Deep Search — Identify & Look Up Specs",
                 type="primary",
                 disabled=not key_ok or not has_image,
+                use_container_width=True,
             )
             if ds_btn:
                 if not vibe.strip():
@@ -844,14 +912,15 @@ if phase == "vision":
                 st.session_state.phase = "deep_review"
                 st.rerun()
 
-        if st.button("Analyse Object →",
+        if st.button("🔍 Identify & Suggest Measurements",
                      type="primary" if not ds_on else "secondary",
-                     disabled=not key_ok):
+                     disabled=not key_ok,
+                     use_container_width=True):
             if not vibe.strip():
                 st.error("Please describe the object first.")
                 st.stop()
-            img_b64 = (base64.standard_b64encode(st.session_state.image_bytes).decode()
-                       if has_image else None)
+            img_b64  = (base64.standard_b64encode(st.session_state.image_bytes).decode()
+                        if has_image else None)
             ref_hint = si.hint_text(st.session_state.get("ref_obj_key", "auto"))
             with st.spinner("AI is examining the object…"):
                 try:
