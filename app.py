@@ -610,69 +610,8 @@ _wizard_header(phase)
 # PHASE A-1 · THE VISION — Upload & Describe
 # ══════════════════════════════════════════════════════════════════════════════
 
-if phase == "vision" and _is_manual():
-    # ── MANUAL MODE — Template browser ───────────────────────────────────────
-    st.subheader("Choose a Template")
-    st.caption(
-        "Browse the built-in library. Select a template, fill in your measurements, "
-        "and generate parametric OpenSCAD without any AI or API key."
-    )
-
-    search_col, cat_col = st.columns([3, 1], gap="medium")
-    with search_col:
-        q = st.text_input("Search templates", placeholder="knob  /  box  /  bracket  …",
-                          key="tl_search_query")
-    with cat_col:
-        cats = ["All"] + tl.CATEGORIES
-        cat  = st.selectbox("Category", cats, key="tl_category")
-
-    matches = tl.search(q, cat if cat != "All" else "")
-    if not matches:
-        st.warning("No templates match your search — try a different keyword.")
-    else:
-        st.caption(f"{len(matches)} template{'s' if len(matches) != 1 else ''} found")
-        # Show 2-column grid of template cards
-        for row_start in range(0, len(matches), 2):
-            c1, c2 = st.columns(2, gap="medium")
-            for col, tmpl in zip((c1, c2), matches[row_start:row_start + 2]):
-                with col:
-                    selected = st.session_state.selected_template_id == tmpl["id"]
-                    border   = "#52b788" if selected else "#1d3557"
-                    bg       = "rgba(45,106,79,0.15)" if selected else "#10202e"
-                    st.markdown(
-                        f'<div style="background:{bg};border:2px solid {border};'
-                        f'border-radius:10px;padding:12px 14px;margin-bottom:4px">'
-                        f'<div style="font-weight:700;color:#a8dadc;font-size:16px">'
-                        f'{tmpl["name"]}</div>'
-                        f'<div style="color:#7a9ab8;font-size:12px;margin:2px 0 6px">'
-                        f'{tmpl["category"]}</div>'
-                        f'<div style="color:#cdd8e0;font-size:13px">'
-                        f'{tmpl["description"]}</div>'
-                        f'</div>',
-                        unsafe_allow_html=True,
-                    )
-                    btn_lbl = "✓ Selected" if selected else "Use this template"
-                    btn_type = "primary" if selected else "secondary"
-                    if st.button(btn_lbl, key=f"sel_{tmpl['id']}",
-                                 use_container_width=True, type=btn_type):
-                        st.session_state.selected_template_id = tmpl["id"]
-                        # Load dims from template into required_dims
-                        t = tl.get(tmpl["id"])
-                        st.session_state.required_dims = [
-                            {
-                                "id":       d["id"],
-                                "question": d["question"],
-                                "prefill":  str(d["default"]),
-                            }
-                            for d in t["dims"]
-                        ]
-                        st.session_state.vibe_description = t["name"]
-                        st.session_state.object_summary   = t["description"]
-                        reset_to("dimensions")
-                        st.rerun()
-
-elif phase == "vision":
-    # ── Camera — resets widget key after each snap so user can keep adding ────
+if phase == "vision":
+    # ── Camera — always shown first in all modes ──────────────────────────────
     _cam_key = f"cam_{st.session_state.camera_counter}"
     camera_photo = st.camera_input(
         "📸 Snap a photo — tap to add more",
@@ -768,36 +707,6 @@ elif phase == "vision":
 
     st.divider()
 
-    # ── Describe the vibe ─────────────────────────────────────────────────────
-    vibe = st.text_area(
-        "What is this? What should it do?",
-        value=st.session_state.vibe_description,
-        height=90,
-        placeholder="e.g. Broken stove knob — D-shaft 6 mm, chunky with ridges",
-    )
-    st.session_state.vibe_description = vibe
-
-    # ── Scale reference + tips (tucked away) ──────────────────────────────────
-    with st.expander("📐 Scale reference & tips (optional)"):
-        st.markdown(si.tip_card_html(), unsafe_allow_html=True)
-        all_ref_labels = si.all_ui_labels()
-        default_ref_idx = (all_ref_labels.index("Credit / debit card")
-                           if "Credit / debit card" in all_ref_labels else 0)
-        ref_label = st.selectbox(
-            "Reference object in photo",
-            options=all_ref_labels,
-            index=default_ref_idx,
-            key="ref_label_selector",
-        )
-        ref_key = si.key_for_label(ref_label)
-        st.session_state.ref_obj_key = ref_key
-        ref_entry = si.REFERENCE_DB.get(ref_key, {})
-        dims_str  = " · ".join(
-            f"{k}: **{v} mm**" for k, v in ref_entry.get("dims", {}).items()
-        )
-        if dims_str:
-            st.caption(f"Known size → {dims_str}")
-
     # ── Derive primary image (first in gallery) ───────────────────────────────
     if st.session_state.captured_images:
         _primary = st.session_state.captured_images[0]
@@ -805,73 +714,163 @@ elif phase == "vision":
         st.session_state.image_name       = _primary["name"]
         st.session_state.image_media_type = _primary["media_type"]
 
-    # ── Action buttons ────────────────────────────────────────────────────────
-    key_ok = bool(st.session_state.get("api_key")) or _needs_no_key()
-    if not key_ok:
-        st.warning("Add an API key in ⚙️ Advanced Settings → AI Brain.", icon="🔑")
-
-    has_image = bool(st.session_state.image_bytes)
-    ds_on = st.session_state.get("ds_enabled", False)
-
-    if ds_on:
-        ds_btn = st.button(
-            "🔍 Deep Search — Identify & Look Up Specs",
-            type="primary",
-            disabled=not key_ok or not has_image,
+    if _is_manual():
+        # ── MANUAL MODE — Template browser ───────────────────────────────────
+        st.subheader("Choose a Template")
+        st.caption(
+            "Browse the built-in library. Select a template, fill in your measurements, "
+            "and generate parametric OpenSCAD without any AI or API key."
         )
-        if ds_btn:
+
+        search_col, cat_col = st.columns([3, 1], gap="medium")
+        with search_col:
+            q = st.text_input("Search templates", placeholder="knob  /  box  /  bracket  …",
+                              key="tl_search_query")
+        with cat_col:
+            cats = ["All"] + tl.CATEGORIES
+            cat  = st.selectbox("Category", cats, key="tl_category")
+
+        matches = tl.search(q, cat if cat != "All" else "")
+        if not matches:
+            st.warning("No templates match your search — try a different keyword.")
+        else:
+            st.caption(f"{len(matches)} template{'s' if len(matches) != 1 else ''} found")
+            for row_start in range(0, len(matches), 2):
+                c1, c2 = st.columns(2, gap="medium")
+                for col, tmpl in zip((c1, c2), matches[row_start:row_start + 2]):
+                    with col:
+                        selected = st.session_state.selected_template_id == tmpl["id"]
+                        border   = "#52b788" if selected else "#1d3557"
+                        bg       = "rgba(45,106,79,0.15)" if selected else "#10202e"
+                        st.markdown(
+                            f'<div style="background:{bg};border:2px solid {border};'
+                            f'border-radius:10px;padding:12px 14px;margin-bottom:4px">'
+                            f'<div style="font-weight:700;color:#a8dadc;font-size:16px">'
+                            f'{tmpl["name"]}</div>'
+                            f'<div style="color:#7a9ab8;font-size:12px;margin:2px 0 6px">'
+                            f'{tmpl["category"]}</div>'
+                            f'<div style="color:#cdd8e0;font-size:13px">'
+                            f'{tmpl["description"]}</div>'
+                            f'</div>',
+                            unsafe_allow_html=True,
+                        )
+                        btn_lbl = "✓ Selected" if selected else "Use this template"
+                        btn_type = "primary" if selected else "secondary"
+                        if st.button(btn_lbl, key=f"sel_{tmpl['id']}",
+                                     use_container_width=True, type=btn_type):
+                            st.session_state.selected_template_id = tmpl["id"]
+                            t = tl.get(tmpl["id"])
+                            st.session_state.required_dims = [
+                                {
+                                    "id":       d["id"],
+                                    "question": d["question"],
+                                    "prefill":  str(d["default"]),
+                                }
+                                for d in t["dims"]
+                            ]
+                            st.session_state.vibe_description = t["name"]
+                            st.session_state.object_summary   = t["description"]
+                            reset_to("dimensions")
+                            st.rerun()
+
+    else:
+        # ── AI MODE — Describe + Analyse ──────────────────────────────────────
+        vibe = st.text_area(
+            "What is this? What should it do?",
+            value=st.session_state.vibe_description,
+            height=90,
+            placeholder="e.g. Broken stove knob — D-shaft 6 mm, chunky with ridges",
+        )
+        st.session_state.vibe_description = vibe
+
+        # ── Scale reference + tips (tucked away) ──────────────────────────────
+        with st.expander("📐 Scale reference & tips (optional)"):
+            st.markdown(si.tip_card_html(), unsafe_allow_html=True)
+            all_ref_labels = si.all_ui_labels()
+            default_ref_idx = (all_ref_labels.index("Credit / debit card")
+                               if "Credit / debit card" in all_ref_labels else 0)
+            ref_label = st.selectbox(
+                "Reference object in photo",
+                options=all_ref_labels,
+                index=default_ref_idx,
+                key="ref_label_selector",
+            )
+            ref_key = si.key_for_label(ref_label)
+            st.session_state.ref_obj_key = ref_key
+            ref_entry = si.REFERENCE_DB.get(ref_key, {})
+            dims_str  = " · ".join(
+                f"{k}: **{v} mm**" for k, v in ref_entry.get("dims", {}).items()
+            )
+            if dims_str:
+                st.caption(f"Known size → {dims_str}")
+
+        # ── Action buttons ─────────────────────────────────────────────────────
+        key_ok = bool(st.session_state.get("api_key")) or _needs_no_key()
+        if not key_ok:
+            st.warning("Add an API key in ⚙️ Advanced Settings → AI Brain.", icon="🔑")
+
+        has_image = bool(st.session_state.image_bytes)
+        ds_on = st.session_state.get("ds_enabled", False)
+
+        if ds_on:
+            ds_btn = st.button(
+                "🔍 Deep Search — Identify & Look Up Specs",
+                type="primary",
+                disabled=not key_ok or not has_image,
+            )
+            if ds_btn:
+                if not vibe.strip():
+                    st.error("Add a description first.")
+                    st.stop()
+                img_b64 = base64.standard_b64encode(st.session_state.image_bytes).decode()
+                with st.spinner("Identifying and searching for specs…"):
+                    try:
+                        result = ds.run_deep_search(
+                            image_b64       = img_b64,
+                            media_type      = st.session_state.image_media_type,
+                            description     = vibe,
+                            brain           = _get_brain(),
+                            gcv_api_key     = st.session_state.get("gcv_api_key", ""),
+                            search_provider = st.session_state.get(
+                                "ds_search_provider", ds.SEARCH_PROVIDER_AI),
+                            search_api_key  = st.session_state.get("ds_search_api_key", ""),
+                        )
+                    except Exception as exc:
+                        st.error(f"Deep Search error: {exc}")
+                        st.stop()
+                st.session_state.ds_result    = result.as_dict()
+                st.session_state.ds_confirmed = False
+                st.session_state.vibe_description = vibe
+                st.session_state.phase = "deep_review"
+                st.rerun()
+
+        if st.button("Analyse Object →",
+                     type="primary" if not ds_on else "secondary",
+                     disabled=not key_ok):
             if not vibe.strip():
-                st.error("Add a description first.")
+                st.error("Please describe the object first.")
                 st.stop()
-            img_b64 = base64.standard_b64encode(st.session_state.image_bytes).decode()
-            with st.spinner("Identifying and searching for specs…"):
+            img_b64 = (base64.standard_b64encode(st.session_state.image_bytes).decode()
+                       if has_image else None)
+            ref_hint = si.hint_text(st.session_state.get("ref_obj_key", "auto"))
+            with st.spinner("AI is examining the object…"):
                 try:
-                    result = ds.run_deep_search(
-                        image_b64       = img_b64,
-                        media_type      = st.session_state.image_media_type,
-                        description     = vibe,
-                        brain           = _get_brain(),
-                        gcv_api_key     = st.session_state.get("gcv_api_key", ""),
-                        search_provider = st.session_state.get(
-                            "ds_search_provider", ds.SEARCH_PROVIDER_AI),
-                        search_api_key  = st.session_state.get("ds_search_api_key", ""),
+                    brain = _get_brain()
+                    summary, dims, scale_meta = brain.extract_dimensions(
+                        img_b64, st.session_state.image_media_type, vibe,
+                        active_p["name"], material, reference_hint=ref_hint,
                     )
                 except Exception as exc:
-                    st.error(f"Deep Search error: {exc}")
+                    st.error(f"AI error: {exc}")
                     st.stop()
-            st.session_state.ds_result    = result.as_dict()
-            st.session_state.ds_confirmed = False
-            st.session_state.vibe_description = vibe
-            st.session_state.phase = "deep_review"
-            st.rerun()
-
-    if st.button("Analyse Object →",
-                 type="primary" if not ds_on else "secondary",
-                 disabled=not key_ok):
-        if not vibe.strip():
-            st.error("Please describe the object first.")
-            st.stop()
-        img_b64 = (base64.standard_b64encode(st.session_state.image_bytes).decode()
-                   if has_image else None)
-        ref_hint = si.hint_text(st.session_state.get("ref_obj_key", "auto"))
-        with st.spinner("AI is examining the object…"):
-            try:
-                brain = _get_brain()
-                summary, dims, scale_meta = brain.extract_dimensions(
-                    img_b64, st.session_state.image_media_type, vibe,
-                    active_p["name"], material, reference_hint=ref_hint,
-                )
-            except Exception as exc:
-                st.error(f"AI error: {exc}")
+            if not dims:
+                st.error("AI returned no dimensions. Try rephrasing the description.")
                 st.stop()
-        if not dims:
-            st.error("AI returned no dimensions. Try rephrasing the description.")
-            st.stop()
-        st.session_state.object_summary = summary
-        st.session_state.required_dims  = dims
-        st.session_state.scale_meta     = scale_meta
-        reset_to("dimensions")
-        st.rerun()
+            st.session_state.object_summary = summary
+            st.session_state.required_dims  = dims
+            st.session_state.scale_meta     = scale_meta
+            reset_to("dimensions")
+            st.rerun()
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PHASE A-1.5 · DEEP REVIEW — Show identification + suggested dims for approval
