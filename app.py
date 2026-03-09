@@ -1059,7 +1059,11 @@ if st.session_state.wizard_step == "identify":
     )
 
     # ── Photo input — camera OR upload ────────────────────────────────────────
-    tab_cam, tab_upload = st.tabs(["📷 Take Photo", "🖼️ Upload Photo"])
+    tab_cam, tab_upload = st.tabs(["📷 Take Photo", "🖼️ Upload Photos"])
+
+    # Helper: set of hashes already in the list (prevents duplicates)
+    def _known_hashes() -> set:
+        return {img["hash"] for img in st.session_state.captured_images}
 
     with tab_cam:
         cam_key   = f"cam_{st.session_state.camera_counter}"
@@ -1068,41 +1072,79 @@ if st.session_state.wizard_step == "identify":
         if cam_photo is not None:
             _bytes = cam_photo.getvalue()
             _hash  = hashlib.md5(_bytes).hexdigest()
-            if _hash != st.session_state.last_cam_hash:
-                st.session_state.image_bytes      = _bytes
-                st.session_state.image_name       = f"photo_{st.session_state.camera_counter}.jpg"
-                st.session_state.image_media_type = "image/jpeg"
-                st.session_state.last_cam_hash    = _hash
-                st.session_state.camera_counter  += 1
+            if _hash not in _known_hashes():
+                st.session_state.captured_images.append({
+                    "bytes": _bytes,
+                    "name":  f"photo_{st.session_state.camera_counter}.jpg",
+                    "mime":  "image/jpeg",
+                    "hash":  _hash,
+                })
+                st.session_state.camera_counter += 1
+                st.rerun()
 
     with tab_upload:
-        uploaded_file = st.file_uploader(
-            "Choose a photo from your device",
+        uploaded_files = st.file_uploader(
+            "Choose one or more photos from your device",
             type=["jpg", "jpeg", "png", "webp", "heic"],
+            accept_multiple_files=True,
             key="photo_uploader",
             label_visibility="collapsed",
         )
-        if uploaded_file is not None:
-            _bytes = uploaded_file.read()
-            _hash  = hashlib.md5(_bytes).hexdigest()
-            if _hash != st.session_state.last_cam_hash:
-                _mime = uploaded_file.type or "image/jpeg"
-                st.session_state.image_bytes      = _bytes
-                st.session_state.image_name       = uploaded_file.name
-                st.session_state.image_media_type = _mime
-                st.session_state.last_cam_hash    = _hash
-
-    # Show thumbnail if we have an image
-    if st.session_state.image_bytes:
-        _, thumb_col, _ = st.columns([1, 2, 1])
-        with thumb_col:
-            st.image(st.session_state.image_bytes, caption="📌 Active photo",
-                     use_container_width=True)
-            if st.button("✕ Remove photo", use_container_width=True):
-                st.session_state.image_bytes    = None
-                st.session_state.last_cam_hash  = ""
-                st.session_state.camera_counter += 1
+        if uploaded_files:
+            _known = _known_hashes()
+            _added = 0
+            for uf in uploaded_files:
+                _bytes = uf.read()
+                _hash  = hashlib.md5(_bytes).hexdigest()
+                if _hash not in _known:
+                    st.session_state.captured_images.append({
+                        "bytes": _bytes,
+                        "name":  uf.name,
+                        "mime":  uf.type or "image/jpeg",
+                        "hash":  _hash,
+                    })
+                    _known.add(_hash)
+                    _added += 1
+            if _added:
                 st.rerun()
+
+    # ── Photo gallery ─────────────────────────────────────────────────────────
+    imgs = st.session_state.captured_images
+    if imgs:
+        # Keep image_bytes pointing at the first photo for the AI pipeline
+        st.session_state.image_bytes      = imgs[0]["bytes"]
+        st.session_state.image_media_type = imgs[0]["mime"]
+        st.session_state.image_name       = imgs[0]["name"]
+
+        n = len(imgs)
+        st.caption(
+            f"{'📌 ' if n == 1 else f'📌 {n} photos — '}"
+            f"{'first photo used for AI analysis' if n > 1 else 'ready'}"
+        )
+
+        cols = st.columns(3)
+        _remove_idx = None
+        for i, img in enumerate(imgs):
+            with cols[i % 3]:
+                st.image(img["bytes"], caption=img["name"][:18],
+                         use_container_width=True)
+                if st.button("✕", key=f"rm_{img['hash']}",
+                             use_container_width=True, help="Remove"):
+                    _remove_idx = i
+
+        if _remove_idx is not None:
+            st.session_state.captured_images.pop(_remove_idx)
+            if not st.session_state.captured_images:
+                st.session_state.image_bytes = None
+            st.rerun()
+
+        if n > 1 and st.button("🗑️ Clear all photos", use_container_width=True):
+            st.session_state.captured_images = []
+            st.session_state.image_bytes     = None
+            st.session_state.camera_counter += 1
+            st.rerun()
+    else:
+        st.session_state.image_bytes = None
 
     # ── Description ───────────────────────────────────────────────────────────
     description = st.text_input(
@@ -1116,7 +1158,7 @@ if st.session_state.wizard_step == "identify":
     st.divider()
 
     # ── Analyse button ────────────────────────────────────────────────────────
-    has_input = bool(st.session_state.image_bytes or description.strip())
+    has_input = bool(st.session_state.captured_images or description.strip())
 
     if not has_input:
         st.caption("Add a photo and/or a description to continue.")
