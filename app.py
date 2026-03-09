@@ -226,15 +226,8 @@ _DEFAULTS = {
     "ai_provider":          "Manual (No AI — Template Mode)",
     # Dims fingerprint — detects if measurements changed after SCAD was generated
     "scad_dims_fp":         "",
-    # BLIP identify results (persisted across reruns)
-    "_blip_caption":        "",
-    "_blip_warn":           "",
-    "_blip_query":          "",
-    "_blip_no_match":       False,
-    # In-app search results
-    "_search_result":       None,   # ws.SearchResult or None
-    "_search_dims_raw":     "",     # raw HF JSON for dim suggestions
-    "_search_done":         False,
+    # Identify result card (persisted across reruns)
+    "_identify_result":     None,   # dict from hfi.identify_object or None
 }
 
 for k, v in _DEFAULTS.items():
@@ -761,222 +754,200 @@ if phase == "vision":
     key_ok    = bool(st.session_state.get("api_key")) or _needs_no_key()
 
     if _is_manual():
-        # ══════════════════════════════════════════════════════════════════════
-        # TIER 1 — In-app research: BLIP photo AI + DDG + Wikipedia
-        # ══════════════════════════════════════════════════════════════════════
-        _btn_cols = st.columns([3, 1])
-        _do_identify = _btn_cols[0].button(
-            "🔍 Identify & Research",
+        # ── Identify button ───────────────────────────────────────────────────
+        if st.button(
+            "🔍 Identify from Photo & Description",
             type="primary",
             disabled=not (has_image or vibe.strip()),
             use_container_width=True,
-        )
-        _do_dims = _btn_cols[1].button(
-            "📐 Suggest dims",
-            disabled=not st.session_state.get("_search_done"),
-            use_container_width=True,
-            help="Uses HF text model to suggest measurements from the research above "
-                 "(free HF token recommended)",
-        )
-
-        if _do_identify:
-            st.session_state["_blip_caption"]    = ""
-            st.session_state["_blip_warn"]       = ""
-            st.session_state["_search_result"]   = None
-            st.session_state["_search_dims_raw"] = ""
-            st.session_state["_search_done"]     = False
-
-            # Step 1 — BLIP photo caption
-            if has_image:
-                with st.spinner("Reading photo…"):
-                    try:
-                        _cap = hfi.caption_image(
-                            st.session_state.image_bytes,
-                            hf_token=st.session_state.get("api_key", ""),
-                        )
-                        st.session_state["_blip_caption"] = _cap
-                    except RuntimeError as _e:
-                        st.session_state["_blip_warn"] = str(_e)
-
-            # Step 2 — DDG + Wikipedia in-app search
-            _caption = st.session_state.get("_blip_caption", "")
-            with st.spinner("Searching DuckDuckGo + Wikipedia…"):
-                _sr = ws.search_object(_caption, vibe)
-            st.session_state["_search_result"] = _sr
-            st.session_state["_search_done"]   = True
+        ):
+            with st.spinner("Analysing photo and description…"):
+                _ir = hfi.identify_object(
+                    image_bytes = st.session_state.image_bytes if has_image else None,
+                    description = vibe,
+                    hf_token    = st.session_state.get("api_key", ""),
+                )
+            # Serialize to plain dict for session state storage
+            st.session_state["_identify_result"] = {
+                "caption":        _ir.caption,
+                "object_type":    _ir.object_type,
+                "creation_idea":  _ir.creation_idea,
+                "template_match": _ir.template_match,
+                "alternatives":   _ir.alternatives,
+                "method":         _ir.method,
+                "warning":        _ir.warning,
+            }
             st.rerun()
 
-        # ── Display search results ────────────────────────────────────────────
-        _sr: ws.SearchResult | None = st.session_state.get("_search_result")
+        # ── Interactive result card ───────────────────────────────────────────
+        _ir_data: dict | None = st.session_state.get("_identify_result")
 
-        if _sr is not None:
-            _caption = st.session_state.get("_blip_caption", "")
+        if _ir_data:
+            _caption  = _ir_data.get("caption", "")
+            _idea     = _ir_data.get("creation_idea", "")
+            _best_t   = _ir_data.get("template_match") or {}
+            _alts     = _ir_data.get("alternatives") or []
+            _warning  = _ir_data.get("warning", "")
+
+            if _warning:
+                st.warning(_warning, icon="⚠️")
+
+            # ── What we see ───────────────────────────────────────────────────
             if _caption:
-                st.info(f"📷 Photo AI says: *\"{_caption}\"*")
-            if st.session_state.get("_blip_warn"):
-                st.warning(st.session_state["_blip_warn"])
-
-            if _sr.has_content():
-                if _sr.ddg_answer:
-                    st.success(f"**Quick answer:** {_sr.ddg_answer}")
-
-                if _sr.ddg_abstract:
-                    with st.expander(f"🌐 DuckDuckGo — definition", expanded=True):
-                        st.markdown(_sr.ddg_abstract)
-
-                if _sr.wiki_extract:
-                    with st.expander(
-                        f"📖 Wikipedia — {_sr.wiki_title}", expanded=not _sr.ddg_abstract
-                    ):
-                        st.markdown(_sr.wiki_extract)
-
-                if _sr.dimensions:
-                    with st.expander(
-                        f"📐 {len(_sr.dimensions)} dimension mention"
-                        f"{'s' if len(_sr.dimensions) != 1 else ''} found in results",
-                        expanded=True,
-                    ):
-                        for d in _sr.dimensions:
-                            st.markdown(
-                                f"- **{d['value']} {d['unit']}** — "
-                                f"<span style='color:#7a9ab8;font-size:12px'>"
-                                f"{d['context']}</span>",
-                                unsafe_allow_html=True,
-                            )
-            elif not _caption:
-                st.warning(
-                    "No results found. Try a more specific description "
-                    "or add a photo.",
-                    icon="🔎",
-                )
-
-            # ── Try to match a template from research ─────────────────────────
-            _query   = f"{_caption} {vibe}".strip()
-            _matches = tl.search(_query, "") if _query else []
-            if _matches:
-                _best = _matches[0]
                 st.markdown(
-                    f'<div style="background:#0d2137;border:1px solid #2d4a60;'
-                    f'border-radius:8px;padding:10px 14px;margin:8px 0">'
-                    f'<span style="color:#52b788;font-weight:700">✓ Best template match: '
-                    f'</span><span style="color:#e0f0ff">{_best["name"]}</span>'
-                    f'<span style="color:#7a9ab8;font-size:12px"> — {_best["description"]}'
-                    f'</span></div>',
+                    f'<div style="background:#0a1929;border-left:3px solid #3a78c9;'
+                    f'border-radius:6px;padding:10px 14px;margin-bottom:10px">'
+                    f'<div style="font-size:11px;color:#3a78c9;font-weight:700;'
+                    f'letter-spacing:.05em;text-transform:uppercase">📷 Photo shows</div>'
+                    f'<div style="color:#e0f0ff;font-size:15px;margin-top:4px">'
+                    f'{_caption}</div>'
+                    f'</div>',
                     unsafe_allow_html=True,
                 )
-                if st.button("Use this template →", type="primary",
-                             use_container_width=True, key="use_template_from_search"):
-                    _t = tl.get(_best["id"])
-                    st.session_state.selected_template_id = _best["id"]
+
+            # ── Creation idea ─────────────────────────────────────────────────
+            if _idea:
+                st.markdown(
+                    f'<div style="background:#0a1929;border-left:3px solid #52b788;'
+                    f'border-radius:6px;padding:10px 14px;margin-bottom:14px">'
+                    f'<div style="font-size:11px;color:#52b788;font-weight:700;'
+                    f'letter-spacing:.05em;text-transform:uppercase">💡 What to make</div>'
+                    f'<div style="color:#e0f0ff;font-size:15px;margin-top:4px">'
+                    f'{_idea}</div>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+
+            # ── Best template match ───────────────────────────────────────────
+            if _best_t:
+                st.markdown(
+                    f'<div style="background:#0d2137;border:2px solid #52b788;'
+                    f'border-radius:10px;padding:14px 16px;margin-bottom:8px">'
+                    f'<div style="font-size:11px;color:#52b788;font-weight:700;'
+                    f'letter-spacing:.05em;text-transform:uppercase;margin-bottom:6px">'
+                    f'🖨️ Best match</div>'
+                    f'<div style="font-weight:700;color:#a8dadc;font-size:17px">'
+                    f'{_best_t.get("name","")}</div>'
+                    f'<div style="color:#7a9ab8;font-size:12px;margin:3px 0 8px">'
+                    f'{_best_t.get("category","")}</div>'
+                    f'<div style="color:#cdd8e0;font-size:13px">'
+                    f'{_best_t.get("description","")}</div>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+
+                if st.button(
+                    f"✓ Yes — make a {_best_t.get('name','')} →",
+                    type="primary",
+                    use_container_width=True,
+                    key="confirm_best_match",
+                ):
+                    _t = tl.get(_best_t["id"])
+                    st.session_state.selected_template_id = _best_t["id"]
                     st.session_state.required_dims = [
-                        {"id": d["id"], "question": d["question"], "prefill": str(d["default"])}
+                        {"id": d["id"], "question": d["question"],
+                         "prefill": str(d["default"])}
                         for d in _t["dims"]
                     ]
-                    st.session_state.vibe_description = vibe
+                    st.session_state.vibe_description = vibe or _best_t["name"]
                     st.session_state.object_summary   = (
-                        f"📷 *\"{_caption}\"*\n\n"
-                        f"**{_best['name']}** — {_best['description']}"
-                    ) if _caption else f"**{_best['name']}** — {_best['description']}"
+                        (f"📷 *{_caption}*\n\n" if _caption else "") +
+                        f"**{_best_t['name']}** — {_best_t['description']}"
+                    )
                     reset_to("dimensions")
                     st.rerun()
 
-        # ── Suggest dims button result ────────────────────────────────────────
-        if _do_dims and _sr is not None:
-            _context = _sr.full_text()
-            with st.spinner("Asking HF to suggest measurements…"):
-                try:
-                    _raw = hfi.suggest_dimensions_from_context(
-                        caption     = st.session_state.get("_blip_caption", ""),
-                        description = vibe,
-                        search_context = _context,
-                        hf_token    = st.session_state.get("api_key", ""),
-                    )
-                    st.session_state["_search_dims_raw"] = _raw
-                except RuntimeError as _e:
-                    st.warning(str(_e))
+            else:
+                st.info(
+                    "No template matched yet — try describing it more specifically "
+                    "below, or browse templates manually.",
+                    icon="🔎",
+                )
 
-        # Show HF dimension suggestions
-        _raw_dims = st.session_state.get("_search_dims_raw", "")
-        if _raw_dims:
-            import json as _json, re as _re
-            try:
-                _clean = _re.sub(r"```(?:json)?\n?", "", _raw_dims).strip().rstrip("`")
-                _suggested = _json.loads(_clean)
-                if isinstance(_suggested, list) and _suggested:
-                    st.markdown("#### 📐 AI-suggested measurements")
-                    st.caption(
-                        "These are estimates based on web research — "
-                        "verify with a caliper before printing."
-                    )
-                    # Build required_dims from suggestions and go to dimensions phase
-                    if st.button("✓ Use these measurements →", type="primary",
-                                 use_container_width=True):
-                        st.session_state.required_dims = [
-                            {
-                                "id":               _re.sub(r"\W+", "_", d.get("name", f"dim_{i}")).lower(),
-                                "question":         d.get("name", f"Dimension {i+1}") + " (mm)",
-                                "prefill":          str(d.get("value", "")),
-                                "estimated_value":  str(d.get("value", "")),
-                                "estimation_confidence": d.get("confidence", "low"),
-                                "estimation_source": "Web research + HF AI",
-                            }
-                            for i, d in enumerate(_suggested)
-                        ]
-                        st.session_state.vibe_description = vibe
-                        st.session_state.object_summary   = (
-                            f"From web research: {st.session_state.get('_blip_caption','')} "
-                            f"— {vibe}"
-                        )
-                        reset_to("dimensions")
-                        st.rerun()
-                    for d in _suggested:
-                        conf_color = {
-                            "high": "#52b788", "medium": "#f4a261", "low": "#e76f51"
-                        }.get(str(d.get("confidence", "low")).split()[0].lower(), "#7a9ab8")
+            # ── Alternatives ──────────────────────────────────────────────────
+            if _alts:
+                st.markdown(
+                    '<div style="font-size:12px;color:#7a9ab8;margin:8px 0 4px">'
+                    'Other possibilities:</div>',
+                    unsafe_allow_html=True,
+                )
+                _alt_cols = st.columns(len(_alts))
+                for _col, _alt in zip(_alt_cols, _alts):
+                    with _col:
                         st.markdown(
-                            f'<div style="display:flex;justify-content:space-between;'
-                            f'padding:4px 0;border-bottom:1px solid #1d3557">'
-                            f'<span style="color:#e0f0ff">{d.get("name","?")}</span>'
-                            f'<span style="color:{conf_color};font-weight:700">'
-                            f'{d.get("value","?")} {d.get("unit","mm")}</span>'
+                            f'<div style="background:#10202e;border:1px solid #1d3557;'
+                            f'border-radius:8px;padding:10px 12px">'
+                            f'<div style="font-weight:600;color:#a8dadc;font-size:14px">'
+                            f'{_alt.get("name","")}</div>'
+                            f'<div style="color:#7a9ab8;font-size:11px;margin-top:3px">'
+                            f'{_alt.get("description","")}</div>'
                             f'</div>',
                             unsafe_allow_html=True,
                         )
-            except (_json.JSONDecodeError, Exception):
-                st.text(_raw_dims)   # show raw if parsing fails
+                        if st.button(
+                            "Use this",
+                            key=f"use_alt_{_alt['id']}",
+                            use_container_width=True,
+                        ):
+                            _at = tl.get(_alt["id"])
+                            st.session_state.selected_template_id = _alt["id"]
+                            st.session_state.required_dims = [
+                                {"id": d["id"], "question": d["question"],
+                                 "prefill": str(d["default"])}
+                                for d in _at["dims"]
+                            ]
+                            st.session_state.vibe_description = vibe or _alt["name"]
+                            st.session_state.object_summary   = (
+                                f"**{_alt['name']}** — {_alt['description']}"
+                            )
+                            reset_to("dimensions")
+                            st.rerun()
 
-        st.divider()
+            # ── Refine description ────────────────────────────────────────────
+            st.markdown(
+                '<div style="font-size:12px;color:#7a9ab8;margin:12px 0 2px">'
+                '🔄 Not right? Add more detail and identify again:</div>',
+                unsafe_allow_html=True,
+            )
+            _refine = st.text_input(
+                "Refine",
+                label_visibility="collapsed",
+                placeholder="e.g. it's a D-shaft knob, 30mm diameter, for a stove",
+                key="refine_description",
+            )
+            if _refine.strip():
+                st.session_state.vibe_description = _refine
+                st.session_state["_identify_result"] = None
+                st.rerun()
 
-        # ══════════════════════════════════════════════════════════════════════
-        # TIER 2 — Smarter AI options
-        # ══════════════════════════════════════════════════════════════════════
+            st.divider()
+
+        # ── Smarter AI options (collapsed) ────────────────────────────────────
         with st.expander("🤖 Get smarter results — connect an AI"):
             st.markdown("""
-**Option A — Free Hugging Face token** *(recommended)*
-Unlocks better vision models + higher rate limits for the Identify button.
-1. Sign up free at [huggingface.co](https://huggingface.co)
-2. Get a token → [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens)
+**Free Hugging Face token** *(best first step)*
+Unlocks better photo reading + richer creation suggestions.
+1. Sign up free → [huggingface.co](https://huggingface.co)
+2. Create a token → [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens)
 3. Paste it in **⚙️ Advanced Settings → AI Brain**
 
 ---
 
-**Option B — Local AI (Ollama) — offline, private, no cost**
+**Local AI — Ollama** *(offline, private, no cost)*
 1. Install [Ollama](https://ollama.ai) on your computer or home server
-2. Run: `ollama pull llava`
-3. Select **Local (Ollama)** in ⚙️ Advanced Settings
-4. Works from your phone over Wi-Fi — no cloud, no key
+2. `ollama pull llava` (vision model)
+3. Select **Local (Ollama)** in ⚙️ Advanced Settings — works over Wi-Fi
 
 ---
 
-**Option C — Any AI app you already have**
-ChatGPT, Claude, Gemini, phone AI apps:
-1. Download your photo, share it with the AI
-2. Ask: *"What is this? List the measurements I'd need to 3D print it (in mm)."*
-3. Paste the answer into the description above and tap **Identify & Research** again
+**Any AI app on your phone**
+Share the photo with ChatGPT / Claude / Gemini and ask:
+*"What is this? What measurements do I need to 3D print a replacement in mm?"*
+Then paste the answer into the description above and tap Identify again.
 """)
 
-        # ── Browse templates manually (last resort) ───────────────────────────
-        with st.expander("📚 Browse templates manually"):
+        # ── Browse templates manually ─────────────────────────────────────────
+        with st.expander("📚 Browse all templates manually"):
             search_col, cat_col = st.columns([3, 1], gap="medium")
             with search_col:
                 q = st.text_input("Search", placeholder="knob  /  box  /  bracket  …",
@@ -1016,11 +987,8 @@ ChatGPT, Claude, Gemini, phone AI apps:
                                 st.session_state.selected_template_id = tmpl["id"]
                                 t = tl.get(tmpl["id"])
                                 st.session_state.required_dims = [
-                                    {
-                                        "id":       d["id"],
-                                        "question": d["question"],
-                                        "prefill":  str(d["default"]),
-                                    }
+                                    {"id": d["id"], "question": d["question"],
+                                     "prefill": str(d["default"])}
                                     for d in t["dims"]
                                 ]
                                 st.session_state.vibe_description = vibe or t["name"]
