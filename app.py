@@ -682,8 +682,6 @@ _DEFAULTS: dict = {
     "market_result":        None,        # dict from _market_search()
     "buy_search_query":     "",          # editable query in the buy panel
     "reanalyse_triggered":  False,       # triggers deep AI re-analysis
-    "enhance_diagram_triggered": False,  # triggers AI SVG enhancement
-    "enhanced_svg":         "",          # AI-enhanced blueprint SVG
     "enhanced_diagram_text": "",         # plain-English AI description of the part
     "enhance_diagram_expanded": False,   # auto-open the details expander after generation
     "nav_confirm_home":     False,       # show "go home?" confirmation on Step 1 back
@@ -1065,12 +1063,6 @@ to find an OEM replacement.
 Technical Schematic Data: Provide the critical dimensions required for a 3D-printed \
 replacement. Use millimetres. Match dimension IDs to the selected template_id below.
 
-SVG Diagram Code: Generate a clean, high-contrast SVG technical drawing of the part. \
-Style it as a professional blueprint: dark navy background (#0d1b2a), white/cyan \
-construction lines (#00e5ff), red dimension annotations (#ff1744). \
-Use viewBox="0 0 400 300". No external references, no filters, no clipPath. \
-Label the most important dimensions directly on the drawing.
-
 Available template IDs (choose the closest match):
   knob_d_shaft, knob_round_shaft, knob_pointer,
   box_open, box_with_lid, end_cap, l_bracket,
@@ -1097,7 +1089,6 @@ JSON structure:
   "search_terms": ["...", "...", "..."],
   "dimensions": {"dim_id": numeric_value},
   "template_id": "...",
-  "svg_code": "<svg ...>...</svg>",
   "creation_idea": "one sentence describing what to 3D-print"
 }"""
 
@@ -1221,7 +1212,7 @@ def analyze_input(
     Returns a dict with at minimum:
       caption, project_description, template_id, template_name,
       object_type, suggested_dims, method, warning,
-      part_name, part_model, search_terms, ai_svg
+      part_name, part_model, search_terms
     """
     caption = ""
     warning = ""
@@ -1255,7 +1246,6 @@ def analyze_input(
                 "part_name":           vision.get("part_name", ""),
                 "part_model":          vision.get("part_model", ""),
                 "search_terms":        vision.get("search_terms", []),
-                "ai_svg":              vision.get("svg_code", ""),
                 "part_description":    vision.get("part_description", ""),
                 "device_description":  vision.get("device_context", ""),
             }
@@ -1340,7 +1330,6 @@ def analyze_input(
         "part_name":           "",
         "part_model":          "",
         "search_terms":        [],
-        "ai_svg":              "",
         "part_description":    "",
         "device_description":  "",
     }
@@ -1395,78 +1384,8 @@ def _fetch_part_images(part_name: str, max_images: int = 3) -> list[str]:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# AI DIAGRAM ENHANCEMENT  — ask AI to generate a richer annotated SVG
+# AI PRINT ANALYSIS  — plain-English description of dimensions, material, fit
 # ══════════════════════════════════════════════════════════════════════════════
-
-def _enhance_diagram_with_ai(
-    part_name:        str,
-    part_description: str,
-    template_name:    str,
-    dim_values:       dict,
-    provider:         str,
-    api_key:          str,
-) -> str:
-    """
-    Ask the selected AI model (text-only) to produce a detailed annotated
-    SVG blueprint.  Returns the SVG string or "" on any failure.
-    """
-    dims_text = ", ".join(f"{k}={v}mm" for k, v in dim_values.items()) or "unknown"
-    prompt = (
-        f"Generate a clean, detailed technical SVG blueprint for this 3D-printable part.\n\n"
-        f"Part: {part_name or template_name}\n"
-        f"Description: {part_description or template_name}\n"
-        f"Key dimensions: {dims_text}\n\n"
-        f"Requirements:\n"
-        f"- Dark navy background (#0d1b2a), viewBox=\"0 0 400 300\"\n"
-        f"- White/cyan construction lines (#00e5ff)\n"
-        f"- Red dimension annotation lines and text (#ff1744)\n"
-        f"- Label ALL key dimensions with arrows and mm values\n"
-        f"- Include both a top view and a side/front view\n"
-        f"- No external references, no filters, no clipPath\n\n"
-        f"Output ONLY the raw SVG code — no markdown, no prose."
-    )
-    raw = ""
-    try:
-        if provider == "claude":
-            import anthropic
-            client = anthropic.Anthropic(api_key=api_key)
-            resp   = client.messages.create(
-                model="claude-opus-4-5", max_tokens=2048,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            raw = resp.content[0].text
-        elif provider == "openai":
-            from openai import OpenAI
-            client = OpenAI(api_key=api_key)
-            resp   = client.chat.completions.create(
-                model="gpt-4o", max_tokens=2048,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            raw = resp.choices[0].message.content
-        elif provider == "gemini":
-            _url = (
-                "https://generativelanguage.googleapis.com/v1beta/models/"
-                f"gemini-1.5-flash:generateContent?key={api_key}"
-            )
-            _r = requests.post(
-                _url,
-                json={"contents": [{"parts": [{"text": prompt}]}],
-                      "generationConfig": {"maxOutputTokens": 2048}},
-                timeout=40,
-            )
-            _r.raise_for_status()
-            raw = _r.json()["candidates"][0]["content"]["parts"][0]["text"]
-    except Exception:
-        return ""
-
-    if not raw:
-        return ""
-    raw = raw.strip()
-    raw = re.sub(r"^```[a-z]*\n?", "", raw)
-    raw = re.sub(r"\n?```$", "", raw).strip()
-    m = re.search(r"<svg[\s\S]*?</svg>", raw, re.IGNORECASE)
-    return m.group() if m else ""
-
 
 def _enhance_diagram_text(
     part_name:        str,
@@ -1835,8 +1754,6 @@ if st.session_state.wizard_step == "identify":
         st.session_state.show_buy_links          = False
         st.session_state.buy_search_query        = ""
         st.session_state.reanalyse_triggered       = False
-        st.session_state.enhance_diagram_triggered = False
-        st.session_state.enhanced_svg              = ""
         st.session_state.enhanced_diagram_text     = ""
         st.session_state.enhance_diagram_expanded  = False
         _go("results")
@@ -2022,9 +1939,10 @@ def _svg_knob(dv: dict) -> str:
         f'fill="{_SF}" stroke="{_SC}" stroke-width="2.5" rx="6"/>',
         f'<rect x="{sx:.1f}" y="{sy:.1f}" width="{shw:.1f}" height="{shh:.1f}" '
         f'fill="#b0cfe8" stroke="{_SC}" stroke-width="1.5"/>',
-        _hline(bx, by - 12, bx + pw, f"{kd:.1f} mm", above=True),
-        _vline(bx + pw + 5, by, by + ph, f"{kh:.1f} mm", right=True),
-        _hline(sx, by + ph + 18, sx + shw, f"⌀{sd:.2f}", above=False),
+        _hline(bx, by - 12, bx + pw, "A", above=True),
+        _vline(bx + pw + 5, by, by + ph, "B", right=True),
+        _hline(sx, by + ph + 18, sx + shw, "C", above=False),
+        _vline(sx - 10, sy, by + ph, "D", right=False),
     ]
     return _svg_wrap("".join(els))
 
@@ -2045,10 +1963,10 @@ def _svg_box(dv: dict) -> str:
         f'<rect x="{ox+wsc:.1f}" y="{oy+wsc:.1f}" '
         f'width="{iw*sc:.1f}" height="{ih*sc:.1f}" '
         f'fill="#f0f8ff" stroke="{_SC}" stroke-width="1" stroke-dasharray="4 2"/>',
-        _hline(ox + wsc, oy - 14, ox + wsc + iw * sc, f"{iw:.0f} mm inner", above=True),
-        _hline(ox, oy + oh + 18, ox + ow, f"{iw + 2*wall:.0f} mm outer", above=False),
-        _vline(ox + ow + 5, oy, oy + oh, f"{ih + wall:.0f} mm", right=True),
-        _vline(ox - 5, oy + wsc, oy + oh, f"{ih:.0f} mm", right=False),
+        _hline(ox + wsc, oy - 14, ox + wsc + iw * sc, "A", above=True),
+        _vline(ox - 5, oy + wsc, oy + oh, "B", right=False),
+        f'<text x="{ox+wsc/2:.1f}" y="{oy+wsc/2+4:.1f}" text-anchor="middle" '
+        f'font-size="12" font-weight="bold" fill="{_SD}" font-family="sans-serif">C</text>',
     ]
     return _svg_wrap("".join(els))
 
@@ -2076,9 +1994,10 @@ def _svg_end_cap(dv: dict) -> str:
         f'x2="{pcx:.1f}" y2="{by+5:.1f}" '
         f'stroke="#aaa" stroke-width="1" stroke-dasharray="6 3"/>',
         _hline(pcx - pw_half, by - fhsc - phsc - 12,
-               pcx + pw_half, f"⌀{pd:.1f} plug", above=True),
-        _hline(pcx - fw_half, by + 16, pcx + fw_half, f"⌀{fd:.1f} flange", above=False),
-        _vline(pcx + fw_half + 5, by - fhsc - phsc, by, f"{ph+fh:.1f} mm", right=True),
+               pcx + pw_half, "A", above=True),
+        _vline(pcx - pw_half - 10, by - fhsc - phsc, by - fhsc, "B", right=False),
+        _hline(pcx - fw_half, by + 16, pcx + fw_half, "C", above=False),
+        _vline(pcx + fw_half + 5, by - fhsc, by, "D", right=True),
     ]
     return _svg_wrap("".join(els))
 
@@ -2095,10 +2014,10 @@ def _svg_l_bracket(dv: dict) -> str:
         f'fill="{_SF}" stroke="{_SC}" stroke-width="2"/>',
         f'<rect x="{ox:.1f}" y="{oy-ts:.1f}" width="{a2s:.1f}" height="{ts:.1f}" '
         f'fill="{_SF}" stroke="{_SC}" stroke-width="2"/>',
-        _vline(ox - 5, oy - a1s, oy, f"{a1:.0f} mm", right=False),
-        _hline(ox, oy + 16, ox + a2s, f"{a2:.0f} mm", above=False),
-        f'<text x="{ox+a2s+12:.1f}" y="{oy-ts/2+4:.1f}" font-size="10" '
-        f'fill="{_SD}" font-family="sans-serif">t={t:.1f}</text>',
+        _vline(ox - 5, oy - a1s, oy, "A", right=False),
+        _hline(ox, oy + 16, ox + a2s, "B", above=False),
+        f'<text x="{ox+a2s+12:.1f}" y="{oy-ts/2+4:.1f}" font-size="12" font-weight="bold" '
+        f'fill="{_SD}" font-family="sans-serif">C</text>',
     ]
     return _svg_wrap("".join(els))
 
@@ -2121,10 +2040,9 @@ def _svg_cable_clip(dv: dict) -> str:
         f'<rect x="{cx-ros:.1f}" y="{cy+ros:.1f}" '
         f'width="{ros*2:.1f}" height="{bhs:.1f}" '
         f'fill="{_SF}" stroke="{_SC}" stroke-width="2"/>',
-        _hline(cx - ris, cy - ros - 12, cx + ris, f"⌀{cd:.1f} cable", above=True),
-        _hline(cx - ros, cy + ros + bhs + 14, cx + ros,
-               f"⌀{r_out*2:.1f} OD", above=False),
-        _vline(cx + ros + 5, cy + ros, cy + ros + bhs, f"{bh:.1f} mm", right=True),
+        _hline(cx - ris, cy - ros - 12, cx + ris, "A", above=True),
+        _hline(cx - ros, cy + ros + bhs + 14, cx + ros, "B", above=False),
+        _vline(cx + ros + 5, cy + ros, cy + ros + bhs, "C", right=True),
     ]
     return _svg_wrap("".join(els))
 
@@ -2151,9 +2069,9 @@ def _svg_wall_hook(dv: dict) -> str:
         f'<rect x="{ox+hrs-hts:.1f}" y="{arm_y-tips:.1f}" '
         f'width="{hts:.1f}" height="{tips:.1f}" '
         f'fill="{_SF}" stroke="{_SC}" stroke-width="2"/>',
-        _vline(ox - 5, oy, oy + hs, f"{pht:.0f} mm", right=False),
-        _hline(ox + ps, arm_y + hts + 14, ox + hrs, f"{hr:.0f} mm", above=False),
-        _vline(ox + hrs + 5, arm_y - tips, arm_y, f"{tip:.0f} mm", right=True),
+        _vline(ox - 5, oy, oy + hs, "A", right=False),
+        _hline(ox + ps, arm_y + hts + 14, ox + hrs, "B", above=False),
+        _vline(ox + hrs + 5, arm_y - tips, arm_y, "C", right=True),
     ]
     return _svg_wrap("".join(els))
 
@@ -2176,9 +2094,9 @@ def _svg_spacer(dv: dict) -> str:
         f'fill="white" stroke="{_SC}" stroke-width="1.2"/>',
         f'<line x1="{cx:.1f}" y1="{ty-8:.1f}" x2="{cx:.1f}" y2="{ty+hs+8:.1f}" '
         f'stroke="#aaa" stroke-width="1" stroke-dasharray="4 2"/>',
-        _hline(cx - ods/2, ty - 14, cx + ods/2, f"⌀{od:.1f} OD", above=True),
-        _hline(cx - ids/2, ty + hs + 16, cx + ids/2, f"⌀{iid:.1f} bore", above=False),
-        _vline(cx + ods/2 + 5, ty, ty + hs, f"{h:.1f} mm", right=True),
+        _hline(cx - ods/2, ty - 14, cx + ods/2, "A", above=True),
+        _hline(cx - ids/2, ty + hs + 16, cx + ids/2, "B", above=False),
+        _vline(cx + ods/2 + 5, ty, ty + hs, "C", right=True),
     ]
     return _svg_wrap("".join(els))
 
@@ -2206,9 +2124,9 @@ def _svg_drawer_pull(dv: dict) -> str:
         f'<rect x="{lx:.1f}" y="{by-ghs-gws*0.4:.1f}" '
         f'width="{cls:.1f}" height="{gws*0.4:.1f}" '
         f'fill="{_SF}" stroke="{_SC}" stroke-width="2" rx="4"/>',
-        _hline(lx + off, by + 14, lx + off + sps, f"{sp:.0f} mm span", above=False),
-        _hline(lx, by - ghs - 16, lx + cls, f"{gl:.0f} mm total", above=True),
-        _vline(lx - 5, by - ghs, by, f"{gh:.0f} mm", right=False),
+        _hline(lx + off, by + 14, lx + off + sps, "A", above=False),
+        _hline(lx, by - ghs - 16, lx + cls, "B", above=True),
+        _vline(lx - 5, by - ghs, by, "C", right=False),
     ]
     return _svg_wrap("".join(els))
 
@@ -2237,9 +2155,9 @@ def _svg_button_cap(dv: dict) -> str:
         f'<rect x="{cx-sws/2:.1f}" y="{ty+shs:.1f}" '
         f'width="{sws:.1f}" height="{sdps:.1f}" '
         f'fill="white" stroke="{_SC}" stroke-width="1.2" stroke-dasharray="3 2"/>',
-        _hline(cx - cds/2, ty + shs + chs + 16, cx + cds/2, f"⌀{cd:.1f} mm", above=False),
-        _vline(cx + cds/2 + 5, ty, ty + shs + chs, f"{ch+sh:.1f} mm", right=True),
-        _hline(cx - sws/2, ty - 12, cx + sws/2, f"{sw:.1f} stem", above=True),
+        _hline(cx - cds/2, ty + shs + chs + 16, cx + cds/2, "A", above=False),
+        _vline(cx + cds/2 + 5, ty, ty + shs + chs, "B", right=True),
+        _hline(cx - sws/2, ty - 12, cx + sws/2, "C", above=True),
     ]
     return _svg_wrap("".join(els))
 
@@ -2258,6 +2176,46 @@ _SVG_DISPATCH: dict = {
     "drawer_pull":      _svg_drawer_pull,
     "button_cap":       _svg_button_cap,
 }
+
+# ── Dimension label legend: maps letter → dim_id per template ─────────────────
+# Letters are assigned in visual order (A = widest/most prominent, B = next, ...)
+_SVG_DIM_LABELS: dict[str, list[tuple[str, str]]] = {
+    "knob_d_shaft":     [("A","knob_d"), ("B","knob_h"), ("C","shaft_d"), ("D","shaft_depth")],
+    "knob_round_shaft": [("A","knob_d"), ("B","knob_h"), ("C","shaft_d"), ("D","shaft_depth")],
+    "knob_pointer":     [("A","knob_d"), ("B","knob_h"), ("C","shaft_d"), ("D","shaft_depth")],
+    "box_open":         [("A","inner_w"), ("B","inner_h"), ("C","wall")],
+    "box_with_lid":     [("A","inner_w"), ("B","inner_h"), ("C","wall"), ("D","lid_h")],
+    "end_cap":          [("A","plug_d"), ("B","plug_h"), ("C","flange_d"), ("D","flange_h")],
+    "l_bracket":        [("A","arm1_len"), ("B","arm2_len"), ("C","thickness")],
+    "cable_clip":       [("A","cable_d"), ("B","clip_w"), ("C","wall_t"), ("D","base_h")],
+    "wall_hook":        [("A","plate_h"), ("B","hook_reach"), ("C","tip_h")],
+    "spacer":           [("A","outer_d"), ("B","inner_d"), ("C","height")],
+    "drawer_pull":      [("A","span"), ("B","grip_len"), ("C","grip_h")],
+    "button_cap":       [("A","cap_d"), ("B","cap_h"), ("C","stem_w"), ("D","stem_h")],
+}
+
+
+def _dim_legend_html(template_id: str) -> str:
+    """Return an HTML legend table: A = question, B = question, …"""
+    import template_library as _tl
+    tmpl   = _tl.get(template_id)
+    labels = _SVG_DIM_LABELS.get(template_id, [])
+    if not labels or not tmpl:
+        return ""
+    qmap = {d["id"]: d["question"] for d in tmpl["dims"]}
+    rows = "".join(
+        f'<tr>'
+        f'<td style="padding:1px 8px 1px 0;font-weight:700;'
+        f'font-size:13px;color:{_SD};white-space:nowrap">{ltr}</td>'
+        f'<td style="padding:1px 0;font-size:12px;color:#444">'
+        f'{qmap.get(dim_id, dim_id)}</td>'
+        f'</tr>'
+        for ltr, dim_id in labels
+    )
+    return (
+        f'<table style="margin:4px auto 0 auto;border-collapse:collapse">'
+        f'{rows}</table>'
+    )
 
 
 def part_svg(template_id: str, dim_values: dict) -> str:
@@ -2556,7 +2514,6 @@ if st.session_state.wizard_step == "results":
                 st.session_state.selected_template = tmpl_get(_new_result["template_id"])
                 st.session_state.dim_values        = _new_result["suggested_dims"]
                 st.session_state.reanalyse_triggered      = False
-                st.session_state.enhanced_svg             = ""
                 st.session_state.enhanced_diagram_text    = ""
                 st.session_state.enhance_diagram_expanded = False
                 st.rerun()
@@ -2638,84 +2595,59 @@ if st.session_state.wizard_step == "results":
                 str(raw) if raw is not None else str(dim["default"])
             )
 
-    # ── Measurement diagram ───────────────────────────────────────────────────
-    st.markdown("#### 📐 Measurement diagram")
-
-    # Run AI enhancement if triggered
-    if st.session_state.get("enhance_diagram_triggered"):
-        _eprov = st.session_state.ai_provider
-        _ekey  = st.session_state.api_key
-        if _eprov not in ("claude", "openai", "gemini") or not _ekey:
-            st.warning(
-                "To enhance the diagram, open **⚙️ AI Settings** above "
-                "and add a free Gemini key or a Claude / GPT-4o key."
-            )
-            st.session_state.enhance_diagram_triggered = False
-        else:
-            with st.spinner("AI is generating enhanced details…"):
-                _etext = _enhance_diagram_text(
-                    part_name        = res.get("part_name", ""),
-                    part_description = res.get("part_description", "") or res.get("project_description", ""),
-                    template_name    = tmpl["name"],
-                    dim_values       = st.session_state.dim_values,
-                    provider         = _eprov,
-                    api_key          = _ekey,
-                )
-                _esvg = _enhance_diagram_with_ai(
-                    part_name        = res.get("part_name", ""),
-                    part_description = res.get("part_description", "") or res.get("project_description", ""),
-                    template_name    = tmpl["name"],
-                    dim_values       = st.session_state.dim_values,
-                    provider         = _eprov,
-                    api_key          = _ekey,
-                )
-            st.session_state.enhanced_diagram_text    = _etext
-            st.session_state.enhanced_svg             = _esvg
-            st.session_state.enhance_diagram_expanded = True
-            st.session_state.enhance_diagram_triggered = False
-            st.rerun()
-
-    # Display: prefer enhanced → AI vision → template fallback
-    _display_svg = (
-        st.session_state.get("enhanced_svg")
-        or res.get("ai_svg", "")
+    # ── Measurement reference diagram ─────────────────────────────────────────
+    st.markdown("#### 📐 Measurement guide")
+    st.caption(
+        "Use the letters below to match each physical measurement to the "
+        "correct slider when you click **✏️ No — let me adjust**."
     )
-    if _display_svg and _display_svg.strip().startswith("<svg"):
-        _caption = (
-            "✨ Enhanced blueprint generated by AI."
-            if st.session_state.get("enhanced_svg")
-            else "Blueprint generated by AI vision analysis."
-        )
-        st.markdown(
-            f'<div style="text-align:center;margin:8px 0;'
-            f'border-radius:10px;overflow:hidden">{_display_svg}</div>',
-            unsafe_allow_html=True,
-        )
-        st.caption(_caption)
-    else:
+
+    _diag_col, _leg_col = st.columns([3, 2])
+    with _diag_col:
         svg_html = part_svg(tmpl["id"], st.session_state.dim_values)
         st.markdown(
-            f'<div style="text-align:center;margin:8px 0">{svg_html}</div>',
+            f'<div style="text-align:center;margin:4px 0">{svg_html}</div>',
             unsafe_allow_html=True,
         )
+    with _leg_col:
+        _legend = _dim_legend_html(tmpl["id"])
+        if _legend:
+            st.markdown(_legend, unsafe_allow_html=True)
 
-    # Enhance button
+    # AI print analysis (text only — no SVG generation)
     _enh_col, _ = st.columns([1, 2])
     with _enh_col:
-        if st.button("✨ Enhance diagram with AI", use_container_width=True,
-                     help="Get a detailed AI description of dimensions, materials, and fit"):
-            st.session_state.enhance_diagram_triggered = True
-            st.rerun()
+        if st.button("✨ Get AI print analysis", use_container_width=True,
+                     help="AI explains dimensions, material recommendations, and fit details"):
+            _eprov = st.session_state.ai_provider
+            _ekey  = st.session_state.api_key
+            if _eprov not in ("claude", "openai", "gemini") or not _ekey:
+                st.warning(
+                    "To use this feature, expand **⚙️ AI Settings** above "
+                    "and add a free Gemini key or a Claude / GPT-4o key."
+                )
+            else:
+                with st.spinner("Generating AI print analysis…"):
+                    _etext = _enhance_diagram_text(
+                        part_name        = res.get("part_name", ""),
+                        part_description = res.get("part_description", "") or res.get("project_description", ""),
+                        template_name    = tmpl["name"],
+                        dim_values       = st.session_state.dim_values,
+                        provider         = _eprov,
+                        api_key          = _ekey,
+                    )
+                st.session_state.enhanced_diagram_text    = _etext
+                st.session_state.enhance_diagram_expanded = True
+                st.rerun()
 
-    # AI-enhanced details expander — opens automatically after generation
+    # AI analysis expander — opens automatically after generation
     _etext = st.session_state.get("enhanced_diagram_text", "")
     if _etext:
         with st.expander(
-            "✨ AI-Enhanced Diagram Details",
+            "✨ AI Print Analysis",
             expanded=st.session_state.get("enhance_diagram_expanded", False),
         ):
             st.markdown(_etext)
-            # After first view collapse by default on subsequent reruns
             st.session_state.enhance_diagram_expanded = False
 
     # ── Confirmation buttons ──────────────────────────────────────────────────
@@ -2736,32 +2668,34 @@ if st.session_state.wizard_step == "results":
         st.markdown("---")
         st.markdown("#### ✏️ Adjust measurements")
 
-        dims = tmpl["dims"]
-        updated_dims: dict[str, str] = {}
-        pairs = [dims[i: i + 2] for i in range(0, len(dims), 2)]
-        for pair in pairs:
-            cols = st.columns(len(pair))
-            for col, dim in zip(cols, pair):
-                with col:
-                    current = float(
-                        st.session_state.dim_values.get(dim["id"], dim["default"])
-                    )
-                    val = st.number_input(
-                        dim["question"],
-                        value=current,
-                        step=0.5 if dim["unit"] == "mm" else 1.0,
-                        format="%.1f" if dim["unit"] in ("mm", "") else "%.0f",
-                        key=f"dim_{dim['id']}",
-                    )
-                    updated_dims[dim["id"]] = str(val)
+        _ref_col, _slider_col = st.columns([2, 3])
 
-        # Live-updating diagram
-        st.markdown("**Live preview:**")
-        live_svg = part_svg(tmpl["id"], updated_dims)
-        st.markdown(
-            f'<div style="text-align:center;margin:8px 0">{live_svg}</div>',
-            unsafe_allow_html=True,
-        )
+        with _ref_col:
+            # Static reference diagram with letter legend always visible
+            _ref_svg = part_svg(tmpl["id"], st.session_state.dim_values)
+            st.markdown(
+                f'<div style="text-align:center">{_ref_svg}</div>',
+                unsafe_allow_html=True,
+            )
+            _legend = _dim_legend_html(tmpl["id"])
+            if _legend:
+                st.markdown(_legend, unsafe_allow_html=True)
+
+        with _slider_col:
+            dims = tmpl["dims"]
+            updated_dims: dict[str, str] = {}
+            for dim in dims:
+                current = float(
+                    st.session_state.dim_values.get(dim["id"], dim["default"])
+                )
+                val = st.number_input(
+                    dim["question"],
+                    value=current,
+                    step=0.5 if dim["unit"] == "mm" else 1.0,
+                    format="%.1f" if dim["unit"] in ("mm", "") else "%.0f",
+                    key=f"dim_{dim['id']}",
+                )
+                updated_dims[dim["id"]] = str(val)
 
         # Caliper guide
         with st.expander("📏 How to measure — Caliper guide"):
