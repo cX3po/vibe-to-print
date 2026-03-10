@@ -1504,14 +1504,14 @@ def _market_search(part_name: str, category: str = "") -> dict:
     # ── Pre-formed shopping search URLs (no API key required) ─────────────
     q = urllib.parse.quote_plus(part_name)
     result["buy_links"] = [
-        {"site": "Amazon",
-         "url":  f"https://www.amazon.com/s?k={q}"},
         {"site": "eBay",
          "url":  f"https://www.ebay.com/sch/i.html?_nkw={q}"},
-        {"site": "RepairClinic",
-         "url":  f"https://www.repairclinic.com/Search?q={q}"},
-        {"site": "ApplianceParts",
-         "url":  f"https://www.appliancepartspros.com/search?q={q}"},
+        {"site": "Amazon",
+         "url":  f"https://www.amazon.com/s?k={q}"},
+        {"site": "Thingiverse",
+         "url":  f"https://www.thingiverse.com/search?q={q}"},
+        {"site": "McMaster-Carr",
+         "url":  f"https://www.mcmaster.com/#{q}"},
     ]
     return result
 
@@ -1679,6 +1679,12 @@ if st.session_state.wizard_step == "identify":
     st.divider()
 
     # ── Analyse button ────────────────────────────────────────────────────────
+    _n_photos = len(st.session_state.captured_images)
+    if _n_photos:
+        st.success(
+            f"✅ Analysing {_n_photos} photo{'s' if _n_photos > 1 else ''} — "
+            "the AI will use all of them for best accuracy."
+        )
     has_input = bool(st.session_state.captured_images or description.strip())
 
     if not has_input:
@@ -2241,6 +2247,13 @@ if st.session_state.wizard_step == "results":
     if not tmpl:
         tmpl = INTERNAL_TEMPLATES[0]
 
+    # ── Submitted photos ──────────────────────────────────────────────────────
+    _submitted = st.session_state.captured_images
+    if _submitted:
+        _pcols = st.columns(min(len(_submitted), 4))
+        for _pc, _img in zip(_pcols, _submitted[:4]):
+            _pc.image(_img["bytes"], caption="Your photo", use_container_width=True)
+
     # ── AI Interpretation Card ────────────────────────────────────────────────
     st.markdown("### 🔍 What we found")
 
@@ -2467,10 +2480,10 @@ if st.session_state.wizard_step == "results":
 
             # ── Retailer links as styled buttons ─────────────────────────────
             _SITE_META = {
-                "Amazon":        ("📦", f"https://www.amazon.com/s?k={_q_enc}"),
-                "eBay":          ("🛒", f"https://www.ebay.com/sch/i.html?_nkw={_q_enc}"),
-                "RepairClinic":  ("🔧", f"https://www.repairclinic.com/Search?q={_q_enc}"),
-                "ApplianceParts":("⚙️", f"https://www.appliancepartspros.com/search?q={_q_enc}"),
+                "eBay":         ("🛒", f"https://www.ebay.com/sch/i.html?_nkw={_q_enc}"),
+                "Amazon":       ("📦", f"https://www.amazon.com/s?k={_q_enc}"),
+                "Thingiverse":  ("🖨️", f"https://www.thingiverse.com/search?q={_q_enc}"),
+                "McMaster-Carr":("⚙️", f"https://www.mcmaster.com/#{_q_enc}"),
             }
             _btn_cols = st.columns(len(_SITE_META))
             for _col, (site, (icon, url)) in zip(_btn_cols, _SITE_META.items()):
