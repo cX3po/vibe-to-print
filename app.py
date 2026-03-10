@@ -1502,13 +1502,14 @@ if st.session_state.wizard_step == "identify":
     # ── Power-user upgrade panel (hidden by default) ──────────────────────────
     with st.expander("⚙️ AI Settings (optional)"):
         st.caption("AI analysis works automatically out of the box. "
-                   "Add a Claude or GPT-4o key for deeper, more detailed part identification.")
+                   "Add a Claude, GPT-4o, or Gemini key for deeper, more detailed part identification.")
         _providers = [
             "hf — Hugging Face (active)",
             "claude — Anthropic Claude ✨",
             "openai — GPT-4o ✨",
+            "gemini — Google Gemini ✨ (Free)",
         ]
-        _pkeys = ["hf", "claude", "openai"]
+        _pkeys = ["hf", "claude", "openai", "gemini"]
         _cur   = st.session_state.ai_provider
         _idx   = _pkeys.index(_cur) if _cur in _pkeys else 0
         _provider = st.selectbox("AI brain", _providers, index=_idx,
@@ -1521,13 +1522,40 @@ if st.session_state.wizard_step == "identify":
                                  value=st.session_state.api_key,
                                  placeholder="sk-ant-…")
             st.session_state.api_key = _tok
-            st.markdown("[Get your Anthropic API key →](https://console.anthropic.com/)")
+            st.markdown("""
+**How to get your Anthropic API key:**
+1. Go to [console.anthropic.com](https://console.anthropic.com)
+2. Sign in or create a free account
+3. Click **"API Keys"** in the left sidebar
+4. Click **"Create Key"**, give it a name, and copy it
+5. Paste the key above
+""")
         elif _prov == "openai":
             _tok = st.text_input("OpenAI API key", type="password",
                                  value=st.session_state.api_key,
                                  placeholder="sk-…")
             st.session_state.api_key = _tok
-            st.markdown("[Get your OpenAI API key →](https://platform.openai.com/api-keys)")
+            st.markdown("""
+**How to get your OpenAI API key:**
+1. Go to [platform.openai.com/api-keys](https://platform.openai.com/api-keys)
+2. Sign in or create an account
+3. Click **"Create new secret key"**
+4. Copy the key immediately (you won't see it again)
+5. Paste the key above
+""")
+        elif _prov == "gemini":
+            _tok = st.text_input("Google API key", type="password",
+                                 value=st.session_state.api_key,
+                                 placeholder="AIza…")
+            st.session_state.api_key = _tok
+            st.markdown("""
+**How to get your free Google Gemini API key:**
+1. Go to [aistudio.google.com](https://aistudio.google.com)
+2. Sign in with your Google account
+3. Click **"Get API key"** in the top left
+4. Click **"Create API key"**
+5. Copy the key and paste it above
+""")
 
     st.stop()
 
