@@ -608,6 +608,22 @@ div[data-testid="stButton"].start-over-btn > button {
     color: #7a9ab8 !important;
     width: auto !important;
 }
+/* Small outline style for Back / Forward nav buttons */
+div[data-testid="stButton"]:has(> button[data-testid="stBaseButton-secondary"][key="nav_back"]),
+div[data-testid="stButton"]:has(> button[data-testid="stBaseButton-secondary"][key="nav_fwd"]) {
+    /* target by key attribute on the button itself */
+}
+button[data-testid="stBaseButton-secondary"][key="nav_back"],
+button[data-testid="stBaseButton-secondary"][key="nav_fwd"] {
+    min-height: 32px !important;
+    font-size: 12px !important;
+    font-weight: 400 !important;
+    padding: 2px 10px !important;
+    border-radius: 6px !important;
+    background: transparent !important;
+    border: 1px solid #4a7fa5 !important;
+    color: #7a9ab8 !important;
+}
 /* Pointer cursor on expander headers */
 div[data-testid="stExpander"] summary {
     cursor: pointer !important;
@@ -650,6 +666,7 @@ _DEFAULTS: dict = {
     "reanalyse_triggered":  False,       # triggers deep AI re-analysis
     "enhance_diagram_triggered": False,  # triggers AI SVG enhancement
     "enhanced_svg":         "",          # AI-enhanced blueprint SVG
+    "nav_confirm_home":     False,       # show "go home?" confirmation on Step 1 back
 }
 
 for _k, _v in _DEFAULTS.items():
@@ -722,16 +739,52 @@ def _step_indicator(current_step: str) -> None:
     )
 
 
-# ── "Start Over" nav + step indicator — shown on every non-welcome step ───────
+# ── Back / step indicator / Forward — shown on every non-welcome step ─────────
 if st.session_state.wizard_step != "welcome":
-    _so_col, _ind_col = st.columns([1, 5])
-    with _so_col:
-        if st.button("← Start Over", key="nav_start_over"):
-            for _k in list(st.session_state.keys()):
-                del st.session_state[_k]
-            st.rerun()
+    _step_order  = [s for s, _ in _WIZARD_STEPS]   # ["identify","results","dimensions"]
+    _cur_step    = st.session_state.wizard_step
+    _cur_idx     = _step_order.index(_cur_step) if _cur_step in _step_order else 0
+    _has_result  = st.session_state.identify_result is not None
+    _is_last     = _cur_idx >= len(_step_order) - 1
+    _fwd_enabled = _has_result and not _is_last
+
+    _back_col, _ind_col, _fwd_col = st.columns([1, 5, 1])
+
+    with _back_col:
+        if st.button("← Back", key="nav_back", use_container_width=True):
+            if _cur_idx == 0:
+                # Step 1 → ask before returning to welcome
+                st.session_state.nav_confirm_home = True
+                st.rerun()
+            else:
+                st.session_state.nav_confirm_home = False
+                _go(_step_order[_cur_idx - 1])
+
     with _ind_col:
-        _step_indicator(st.session_state.wizard_step)
+        _step_indicator(_cur_step)
+
+    with _fwd_col:
+        if not _is_last:
+            if st.button("Forward →", key="nav_fwd", use_container_width=True,
+                         disabled=not _fwd_enabled,
+                         help="" if _fwd_enabled else "Complete analysis first"):
+                _go(_step_order[_cur_idx + 1])
+
+    # Confirmation dialog — only shown when Back is pressed on Step 1
+    if st.session_state.get("nav_confirm_home"):
+        st.warning(
+            "Go back to the home screen? Your current progress will be cleared."
+        )
+        _yes_col, _cancel_col, _ = st.columns([1, 1, 4])
+        with _yes_col:
+            if st.button("Yes, go home", key="nav_confirm_yes", type="primary"):
+                for _k in list(st.session_state.keys()):
+                    del st.session_state[_k]
+                st.rerun()
+        with _cancel_col:
+            if st.button("Cancel", key="nav_confirm_cancel"):
+                st.session_state.nav_confirm_home = False
+                st.rerun()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
