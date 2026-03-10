@@ -1122,14 +1122,13 @@ def analyze_input(
                 "ai_svg":              vision.get("svg_code", ""),
             }
         elif vision and "_error" in vision:
-            warning = f"Vision AI: {vision['_error']} — falling back to basic analysis."
+            warning = "Deep analysis unavailable right now — using standard identification instead."
 
     # ── Path B: BLIP caption + HF text model ─────────────────────────────────
     if image_bytes:
         caption = _blip_caption(image_bytes)
         if not caption:
-            warning = warning or ("Photo AI is warming up — "
-                                  "results based on your description for now.")
+            warning = warning or ("⏳ Getting things ready — the AI is starting up and may take up to 30 seconds on first use. Hang tight!")
 
     combined = f"{caption} {description}".strip()
     ai_json: dict | None = None
@@ -1277,9 +1276,9 @@ def _market_search(part_name: str, category: str = "") -> dict:
         found = _PRICE_RE.findall(blob)
         result["prices"] = list(dict.fromkeys(found))[:4]
     except requests.Timeout:
-        result["error"] = "Price search timed out — showing search links only."
+        result["error"] = "Price search took too long — showing search links only."
     except Exception as exc:
-        result["error"] = f"Search unavailable ({exc}) — showing search links."
+        result["error"] = "Couldn't fetch prices right now — showing search links instead."
 
     # ── Pre-formed shopping search URLs (no API key required) ─────────────
     q = urllib.parse.quote_plus(part_name)
@@ -1480,7 +1479,7 @@ if st.session_state.wizard_step == "identify":
                      icon="📸")
             st.stop()
 
-        with st.spinner("Reading photo & identifying part…"):
+        with st.spinner("⏳ Getting things ready — the AI is starting up and may take up to 30 seconds on first use. Hang tight!"):
             _result = analyze_input(
                 image_bytes  = st.session_state.image_bytes,
                 description  = description,
@@ -1488,7 +1487,7 @@ if st.session_state.wizard_step == "identify":
                 ai_provider  = st.session_state.ai_provider,
             )
 
-        with st.spinner("🔎 Searching market prices…"):
+        with st.spinner("🔎 Searching for prices online…"):
             _mq = _result.get("template_name") or description or "replacement part"
             st.session_state.market_result = _market_search(
                 _mq, _result.get("object_type", "")
@@ -1502,8 +1501,8 @@ if st.session_state.wizard_step == "identify":
 
     # ── Power-user upgrade panel (hidden by default) ──────────────────────────
     with st.expander("⚙️ AI Settings (optional)"):
-        st.caption("App already uses Hugging Face automatically. "
-                   "Add a Claude or GPT-4o key for full forensic blueprints.")
+        st.caption("AI analysis works automatically out of the box. "
+                   "Add a Claude or GPT-4o key for deeper, more detailed part identification.")
         _providers = [
             "hf — Hugging Face (active)",
             "claude — Anthropic Claude ✨",
@@ -2179,7 +2178,7 @@ if st.session_state.wizard_step == "results":
         )
         if st.button("🔍 Re-analyse with updated description"):
             st.session_state.vibe_description = re_desc
-            with st.spinner("Re-analysing…"):
+            with st.spinner("⏳ Re-analysing your part — this may take a moment…"):
                 st.session_state.identify_result = analyze_input(
                     st.session_state.image_bytes,
                     re_desc,
