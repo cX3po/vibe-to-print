@@ -1461,7 +1461,7 @@ if st.session_state.wizard_step == "identify":
         _go("results")
 
     # ── Power-user upgrade panel (hidden by default) ──────────────────────────
-    with st.expander("⚙️ Upgrade AI (optional)"):
+    with st.expander("⚙️ AI Settings (optional)"):
         st.caption("App already uses Hugging Face automatically. "
                    "Add a Claude or GPT-4o key for full forensic blueprints.")
         _providers = [
@@ -1482,11 +1482,13 @@ if st.session_state.wizard_step == "identify":
                                  value=st.session_state.api_key,
                                  placeholder="sk-ant-…")
             st.session_state.api_key = _tok
+            st.markdown("[Get your Anthropic API key →](https://console.anthropic.com/)")
         elif _prov == "openai":
             _tok = st.text_input("OpenAI API key", type="password",
                                  value=st.session_state.api_key,
                                  placeholder="sk-…")
             st.session_state.api_key = _tok
+            st.markdown("[Get your OpenAI API key →](https://platform.openai.com/api-keys)")
 
     st.stop()
 
