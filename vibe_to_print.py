@@ -738,7 +738,7 @@ if st.session_state.wizard_step == "welcome":
     font-size:clamp(15px,3vw,20px); color:#cdd8e0;
     max-width:520px; line-height:1.6; margin-bottom:32px;
   ">
-    Snap. Measure. Print.<br>
+    Snap. Describe. Print.<br>
     Your AI-powered shortcut from a photo of a broken part
     to a printable 3D design — no CAD experience needed.
   </p>
