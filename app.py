@@ -1342,12 +1342,23 @@ if st.session_state.wizard_step == "identify":
     has_input = bool(st.session_state.captured_images or description.strip())
 
     if not has_input:
-        st.caption("Add a photo and/or a description to continue.")
+        st.markdown(
+            '<div style="background:#fff3cd;border:1px solid #f0c040;'
+            'border-radius:8px;padding:10px 14px;font-size:14px;color:#5d4037;'
+            'margin-bottom:8px">⚠️ '
+            'Add a <strong>photo</strong> and/or a <strong>description</strong> '
+            'to continue.</div>',
+            unsafe_allow_html=True,
+        )
 
     if st.button("🔍 Analyse & Find Best Match",
                  type="primary",
-                 disabled=not has_input,
                  use_container_width=True):
+
+        if not has_input:
+            st.error("⚠️ Please add a photo or enter a description first.",
+                     icon="📸")
+            st.stop()
 
         with st.spinner("Reading photo & identifying part…"):
             _result = analyze_input(
