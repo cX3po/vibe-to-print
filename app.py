@@ -1855,16 +1855,20 @@ if st.session_state.wizard_step == "results":
             )
 
     with c_badge:
-        is_vision = "vision" in res.get("method", "")
-        badge_bg  = "#e8f4f8" if not is_vision else "#e8f5e9"
-        badge_ico = "🖨️" if not is_vision else "🤖"
+        is_vision  = "vision" in res.get("method", "")
+        badge_bg   = "#e8f4f8" if not is_vision else "#e8f5e9"
+        badge_ico  = "🖨️" if not is_vision else "🤖"
+        vision_tag = (
+            '<div style="font-size:10px;color:#388e3c;margin-top:4px">AI Vision ✨</div>'
+            if is_vision else ""
+        )
         st.markdown(
             f'<div style="background:{badge_bg};border-radius:10px;padding:14px;'
             f'text-align:center;margin-top:4px">'
             f'<div style="font-size:32px">{badge_ico}</div>'
             f'<div style="font-weight:700;font-size:13px;margin-top:4px">'
             f'{tmpl["category"]}</div>'
-            f'{"<div style=\\"font-size:10px;color:#388e3c;margin-top:4px\\">AI Vision ✨</div>" if is_vision else ""}'
+            f'{vision_tag}'
             f'</div>',
             unsafe_allow_html=True,
         )
