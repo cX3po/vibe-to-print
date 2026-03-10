@@ -617,7 +617,7 @@ _DEFAULTS: dict = {
     "dim_values":         {},          # {dim_id: str}
     "scad_code":          "",
     "api_key":            "",          # HF / Claude / OpenAI token
-    "ai_provider":        "none",      # none | hf | claude | openai | ollama
+    "ai_provider":        "hf",        # hf (default) | claude | openai | none
     "show_refinement":    False,       # toggle refinement panel in results step
     "show_buy_links":     False,       # toggle buy-links panel in results step
     "market_result":      None,        # dict from _market_search()
@@ -673,18 +673,37 @@ if st.session_state.wizard_step == "welcome":
 # AI ANALYSIS ENGINE  (embedded — no external module imports)
 # ══════════════════════════════════════════════════════════════════════════════
 
+# ── Hugging Face model config ─────────────────────────────────────────────────
+# Paste your HF token below so users get higher rate-limits automatically.
+# Leave as "" to let the app work anonymously (slower cold-starts).
+_HF_TOKEN_DEFAULT = ""   # ← paste your token here, e.g. "hf_xxxxxxxxxxxx"
+
 _BLIP_URL     = "https://api-inference.huggingface.co/models/Salesforce/blip-image-captioning-large"
-_HF_TEXT_URL  = "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.3"
+_HF_TEXT_MODEL = "HuggingFaceH4/zephyr-7b-beta"   # primary text model
 _BLIP_TIMEOUT = 35
-_HF_TIMEOUT   = 45
+_HF_TIMEOUT   = 60
 
 
-def _blip_caption(image_bytes: bytes, hf_token: str = "") -> str:
-    """Return a plain-English caption from BLIP. Empty string on failure."""
-    headers = {"Authorization": f"Bearer {hf_token}"} if hf_token else {}
+def _effective_hf_token() -> str:
+    """Return the best available HF token: session key → hardcoded default."""
+    return st.session_state.get("api_key", "") or _HF_TOKEN_DEFAULT
+
+
+def _blip_caption(image_bytes: bytes) -> str:
+    """
+    Send image to Salesforce/blip-image-captioning-large on HF Inference API.
+    Uses _effective_hf_token() automatically. Returns '' on failure.
+    """
+    token   = _effective_hf_token()
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
     try:
         r = requests.post(_BLIP_URL, headers=headers,
                           data=image_bytes, timeout=_BLIP_TIMEOUT)
+        if r.status_code == 503:
+            # Model warming up — wait and retry once
+            time.sleep(12)
+            r = requests.post(_BLIP_URL, headers=headers,
+                              data=image_bytes, timeout=_BLIP_TIMEOUT)
         if r.ok:
             data = r.json()
             if isinstance(data, list) and data:
@@ -694,35 +713,26 @@ def _blip_caption(image_bytes: bytes, hf_token: str = "") -> str:
     return ""
 
 
-def _hf_chat(prompt: str, hf_token: str = "", max_tokens: int = 512) -> str:
-    """Single-turn HF Inference API chat completion. Returns raw text."""
-    try:
-        from huggingface_hub import InferenceClient
-        client = InferenceClient(token=hf_token or None)
-        resp   = client.chat_completion(
-            model="mistralai/Mistral-7B-Instruct-v0.3",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=max_tokens,
-        )
-        return (resp.choices[0].message.content or "").strip()
-    except Exception:
-        return ""
-
-
-def _ollama_chat(prompt: str, model: str = "llava") -> str:
-    """Single-turn Ollama chat. Returns raw text."""
-    try:
-        r = requests.post(
-            "http://localhost:11434/api/chat",
-            json={"model": model,
-                  "messages": [{"role": "user", "content": prompt}],
-                  "stream": False},
-            timeout=60,
-        )
-        if r.ok:
-            return r.json().get("message", {}).get("content", "").strip()
-    except Exception:
-        pass
+def _hf_chat(prompt: str, max_tokens: int = 512) -> str:
+    """
+    Single-turn chat via HuggingFaceH4/zephyr-7b-beta on HF Inference API.
+    Falls back to mistralai/Mistral-7B-Instruct-v0.2 if the primary model errors.
+    """
+    token = _effective_hf_token()
+    for model in (_HF_TEXT_MODEL, "mistralai/Mistral-7B-Instruct-v0.2"):
+        try:
+            from huggingface_hub import InferenceClient
+            client = InferenceClient(token=token or None)
+            resp   = client.chat_completion(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=max_tokens,
+            )
+            text = (resp.choices[0].message.content or "").strip()
+            if text:
+                return text
+        except Exception:
+            continue
     return ""
 
 
@@ -990,17 +1000,17 @@ def analyze_input(
         elif vision and "_error" in vision:
             warning = f"Vision AI: {vision['_error']} — falling back to basic analysis."
 
-    # ── Path B: BLIP + HF/Ollama (existing pipeline) ─────────────────────────
+    # ── Path B: BLIP caption + HF text model ─────────────────────────────────
     if image_bytes:
-        caption = _blip_caption(image_bytes, hf_token if ai_provider == "hf" else "")
+        caption = _blip_caption(image_bytes)
         if not caption:
-            warning = warning or ("Photo AI is warming up or rate-limited — "
-                                  "results based on your description.")
+            warning = warning or ("Photo AI is warming up — "
+                                  "results based on your description for now.")
 
     combined = f"{caption} {description}".strip()
     ai_json: dict | None = None
 
-    if combined and ai_provider in ("hf", "ollama"):
+    if combined and ai_provider in ("hf", "none"):
         tmpl_list = "\n".join(
             f"  {t['id']}: {t['name']} — {t['description']}"
             for t in INTERNAL_TEMPLATES
@@ -1018,11 +1028,7 @@ def analyze_input(
             f'  "suggested_dims": {{"dim_id": numeric_value, ...}}\n'
             f'}}'
         )
-        raw = ""
-        if ai_provider == "hf" and hf_token:
-            raw = _hf_chat(prompt, hf_token)
-        elif ai_provider == "ollama":
-            raw = _ollama_chat(prompt)
+        raw = _hf_chat(prompt)
 
         if raw:
             try:
@@ -1339,60 +1345,63 @@ if st.session_state.wizard_step == "identify":
         st.session_state.show_buy_links    = False
         _go("results")
 
-    # ── Optional AI settings (collapsed) ─────────────────────────────────────
-    with st.expander("⚙️ AI settings (optional — app works without these)"):
+    # ── Optional AI settings (collapsed by default) ───────────────────────────
+    with st.expander("⚙️ Advanced AI settings"):
+        st.caption(
+            "The app uses **Hugging Face** by default — no setup needed. "
+            "Add a free token below for higher rate limits, or upgrade to "
+            "Claude/GPT-4o for full forensic analysis."
+        )
+
         _providers = [
-            "none (keyword matching)",
-            "claude (Anthropic — best analysis ✨)",
-            "openai (GPT-4o — vision analysis ✨)",
-            "hf (Hugging Face — free token)",
-            "ollama (local)",
+            "hf — Hugging Face (default, free)",
+            "claude — Anthropic Claude (best analysis ✨)",
+            "openai — GPT-4o (vision analysis ✨)",
+            "none — keyword matching only (offline)",
         ]
-        _pkeys = ["none", "claude", "openai", "hf", "ollama"]
+        _pkeys = ["hf", "claude", "openai", "none"]
         _cur   = st.session_state.ai_provider
         _idx   = _pkeys.index(_cur) if _cur in _pkeys else 0
-        _provider = st.selectbox(
-            "AI provider",
-            _providers,
-            index=_idx,
-            key="_provider_sel",
-        )
+        _provider = st.selectbox("AI brain", _providers, index=_idx,
+                                 key="_provider_sel")
         st.session_state.ai_provider = _provider.split()[0]
         _prov = st.session_state.ai_provider
 
-        if _prov == "claude":
+        if _prov == "hf":
+            _tok = st.text_input(
+                "Hugging Face token (optional — raises rate limits)",
+                value=st.session_state.api_key,
+                type="password",
+                placeholder="hf_…",
+                help="Free at huggingface.co/settings/tokens",
+            )
+            st.session_state.api_key = _tok
+            st.caption(
+                "Vision: `Salesforce/blip-image-captioning-large`  \n"
+                "Text: `HuggingFaceH4/zephyr-7b-beta`"
+            )
+        elif _prov == "claude":
             _tok = st.text_input(
                 "Anthropic API key",
                 value=st.session_state.api_key,
                 type="password",
                 placeholder="sk-ant-…",
-                help="Get a key at console.anthropic.com",
+                help="console.anthropic.com",
             )
             st.session_state.api_key = _tok
-            st.caption("Uses **claude-opus-4-5** with vision — full forensic analysis + blueprint SVG.")
+            st.caption("Uses **claude-opus-4-5** — full forensic analysis + blueprint SVG.")
         elif _prov == "openai":
             _tok = st.text_input(
                 "OpenAI API key",
                 value=st.session_state.api_key,
                 type="password",
                 placeholder="sk-…",
-                help="Get a key at platform.openai.com",
+                help="platform.openai.com",
             )
             st.session_state.api_key = _tok
-            st.caption("Uses **gpt-4o** with vision — full forensic analysis + blueprint SVG.")
-        elif _prov == "hf":
-            _tok = st.text_input(
-                "Hugging Face token",
-                value=st.session_state.api_key,
-                type="password",
-                placeholder="hf_…",
-                help="Free token at huggingface.co/settings/tokens",
-            )
-            st.session_state.api_key = _tok
-            st.caption("Uses BLIP captioning + Mistral-7B text analysis.")
-        elif _prov == "ollama":
-            st.caption("Make sure `ollama serve` is running on localhost:11434 "
-                       "with the `llava` model pulled.")
+            st.caption("Uses **gpt-4o** — full forensic analysis + blueprint SVG.")
+        else:
+            st.caption("Keyword matching only — no network calls during analysis.")
 
     st.stop()
 
