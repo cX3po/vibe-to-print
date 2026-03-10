@@ -596,6 +596,18 @@ div.stButton > button[kind="primary"] {
     font-size: 18px !important;
     border-radius: 12px !important;
 }
+/* Subtle back / start-over button */
+div[data-testid="stButton"].start-over-btn > button {
+    min-height: 28px !important;
+    font-size: 12px !important;
+    font-weight: 400 !important;
+    padding: 2px 10px !important;
+    border-radius: 6px !important;
+    background: transparent !important;
+    border: 1px solid #4a7fa5 !important;
+    color: #7a9ab8 !important;
+    width: auto !important;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -636,6 +648,16 @@ if st.session_state.ai_provider in ("none", "ollama", ""):
 def _go(step: str) -> None:
     st.session_state.wizard_step = step
     st.rerun()
+
+
+# ── "Start Over" nav — shown on every step except the landing screen ──────────
+if st.session_state.wizard_step != "welcome":
+    _so_col, _ = st.columns([1, 6])
+    with _so_col:
+        if st.button("← Start Over", key="nav_start_over"):
+            for _k in list(st.session_state.keys()):
+                del st.session_state[_k]
+            st.rerun()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
