@@ -650,14 +650,72 @@ def _go(step: str) -> None:
     st.rerun()
 
 
-# ── "Start Over" nav — shown on every step except the landing screen ──────────
+_WIZARD_STEPS = [
+    ("identify",   "📸 Identify"),
+    ("results",    "🔍 Review"),
+    ("dimensions", "📦 Export"),
+]
+
+def _step_indicator(current_step: str) -> None:
+    """Render a horizontal step-progress bar for the 3 wizard steps."""
+    total  = len(_WIZARD_STEPS)
+    index  = next((i for i, (s, _) in enumerate(_WIZARD_STEPS) if s == current_step), 0)
+    number = index + 1
+
+    circles = ""
+    for i, (_, label) in enumerate(_WIZARD_STEPS):
+        if i < index:                      # completed
+            dot_bg, dot_color, dot_border = "#4caf50", "#fff", "#4caf50"
+            symbol = "✓"
+        elif i == index:                   # current
+            dot_bg, dot_color, dot_border = "#1a6fa8", "#fff", "#1a6fa8"
+            symbol = str(i + 1)
+        else:                              # future
+            dot_bg, dot_color, dot_border = "transparent", "#7a9ab8", "#4a7fa5"
+            symbol = str(i + 1)
+
+        label_weight = "700" if i == index else "400"
+        label_color  = "#e0f0ff" if i == index else "#7a9ab8"
+
+        # Connector line before each step except the first
+        connector = (
+            f'<div style="flex:1;height:2px;background:'
+            f'{"#4caf50" if i <= index else "#2a4a6a"};'
+            f'margin:0 4px;align-self:center;min-width:12px"></div>'
+            if i > 0 else ""
+        )
+
+        circles += (
+            f'{connector}'
+            f'<div style="display:flex;flex-direction:column;align-items:center;gap:4px">'
+            f'  <div style="width:28px;height:28px;border-radius:50%;'
+            f'background:{dot_bg};border:2px solid {dot_border};'
+            f'display:flex;align-items:center;justify-content:center;'
+            f'font-size:12px;font-weight:700;color:{dot_color}">{symbol}</div>'
+            f'  <div style="font-size:11px;font-weight:{label_weight};'
+            f'color:{label_color};white-space:nowrap">{label}</div>'
+            f'</div>'
+        )
+
+    st.markdown(
+        f'<div style="display:flex;align-items:flex-start;justify-content:center;'
+        f'padding:8px 0 4px 0;margin-bottom:4px">{circles}</div>'
+        f'<div style="text-align:center;font-size:11px;color:#7a9ab8;'
+        f'margin-bottom:8px">Step {number} of {total}</div>',
+        unsafe_allow_html=True,
+    )
+
+
+# ── "Start Over" nav + step indicator — shown on every non-welcome step ───────
 if st.session_state.wizard_step != "welcome":
-    _so_col, _ = st.columns([1, 6])
+    _so_col, _ind_col = st.columns([1, 5])
     with _so_col:
         if st.button("← Start Over", key="nav_start_over"):
             for _k in list(st.session_state.keys()):
                 del st.session_state[_k]
             st.rerun()
+    with _ind_col:
+        _step_indicator(st.session_state.wizard_step)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
