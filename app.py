@@ -634,6 +634,7 @@ _DEFAULTS: dict = {
     "show_refinement":    False,       # toggle refinement panel in results step
     "show_buy_links":     False,       # toggle buy-links panel in results step
     "market_result":      None,        # dict from _market_search()
+    "buy_search_query":   "",          # editable query in the buy panel
 }
 
 for _k, _v in _DEFAULTS.items():
@@ -1560,6 +1561,7 @@ if st.session_state.wizard_step == "identify":
         st.session_state.selected_template = tmpl_get(_result["template_id"])
         st.session_state.dim_values        = _result["suggested_dims"]
         st.session_state.show_buy_links    = False
+        st.session_state.buy_search_query  = ""
         _go("results")
 
     # ── Power-user upgrade panel (hidden by default) ──────────────────────────
@@ -2194,13 +2196,63 @@ if st.session_state.wizard_step == "results":
                 st.rerun()
 
         if st.session_state.get("show_buy_links"):
-            st.markdown("#### 🛒 Where to buy")
-            for lk in mr["buy_links"]:
-                st.markdown(f"- [{lk['site']}]({lk['url']})")
+            st.markdown("#### 🛒 Search for the original part")
+
+            # ── Editable search query ─────────────────────────────────────────
+            _default_q = (
+                res.get("part_name")
+                or res.get("template_name")
+                or tmpl["name"]
+            )
+            if not st.session_state.buy_search_query:
+                st.session_state.buy_search_query = _default_q
+
+            _search_q = st.text_input(
+                "Refine your search:",
+                value=st.session_state.buy_search_query,
+                key="_buy_search_input",
+            )
+            st.session_state.buy_search_query = _search_q
+            _q_enc = urllib.parse.quote_plus(_search_q or _default_q)
+
+            # ── Part description card ─────────────────────────────────────────
+            _part_desc = (
+                res.get("part_description")
+                or res.get("project_description")
+                or tmpl.get("description", "")
+            )
+            if _part_desc:
+                st.info(f"**What you're looking for:** {_part_desc}")
+
+            # ── Inline image preview ──────────────────────────────────────────
+            _preview_urls = _fetch_part_images(_search_q or _default_q, max_images=1)
+            if _preview_urls:
+                try:
+                    _ir = requests.get(_preview_urls[0], timeout=5)
+                    if _ir.ok and _ir.headers.get("content-type", "").startswith("image"):
+                        _, _ic, _ = st.columns([1, 2, 1])
+                        _ic.image(_ir.content, caption=_search_q or _default_q,
+                                  use_column_width=True)
+                except Exception:
+                    pass
+
+            # ── Retailer links as styled buttons ─────────────────────────────
+            _SITE_META = {
+                "Amazon":        ("📦", f"https://www.amazon.com/s?k={_q_enc}"),
+                "eBay":          ("🛒", f"https://www.ebay.com/sch/i.html?_nkw={_q_enc}"),
+                "RepairClinic":  ("🔧", f"https://www.repairclinic.com/Search?q={_q_enc}"),
+                "ApplianceParts":("⚙️", f"https://www.appliancepartspros.com/search?q={_q_enc}"),
+            }
+            _btn_cols = st.columns(len(_SITE_META))
+            for _col, (site, (icon, url)) in zip(_btn_cols, _SITE_META.items()):
+                _col.link_button(f"{icon} Search {site}", url,
+                                 use_container_width=True)
+
             if mr.get("abstract"):
                 with st.expander("ℹ️ What we found online"):
                     st.write(mr["abstract"])
-            st.markdown(
+
+            st.caption(
                 "Changed your mind? Use the **🖨️ Print it** button above "
                 "or scroll down to continue with the template."
             )
