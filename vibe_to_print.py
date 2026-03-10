@@ -684,6 +684,8 @@ _DEFAULTS: dict = {
     "reanalyse_triggered":  False,       # triggers deep AI re-analysis
     "enhanced_diagram_text": "",         # plain-English AI description of the part
     "enhance_diagram_expanded": False,   # auto-open the details expander after generation
+    "appraisal_result":     None,        # dict from _appraise_object()
+    "appraisal_image_url":  "",          # reference image URL from DDG
     "nav_confirm_home":     False,       # show "go home?" confirmation on Step 1 back
     "api_key_status":       "",          # "" | "active:{prov}" | "cleared"
     "_api_key_committed":   "",          # last saved/entered key value (for Enter detection)
@@ -1093,6 +1095,149 @@ JSON structure:
 }"""
 
 _TEMPLATE_IDS = {t["id"] for t in INTERNAL_TEMPLATES}
+
+# ── Appraisal prompt — identifies the whole item, not the broken part ─────────
+
+_APPRAISAL_SYSTEM_PROMPT = """\
+You are an expert appraiser, historian, and collector with deep knowledge of \
+antiques, electronics, appliances, furniture, tools, and collectibles.
+
+Task: Study the uploaded photo and identify the COMPLETE ITEM shown — the whole \
+device, appliance, or object — not any broken or missing part of it.
+
+Constraint: Output ONLY a valid JSON object — no markdown, no prose.
+JSON structure:
+{
+  "object_name": "Full descriptive name e.g. 'Zenith 6D030 Tabletop Radio'",
+  "estimated_year": "Year range or decade e.g. '1947–1953' or 'Mid-1970s'",
+  "brief_description": "2-3 sentences: what is this item, what does it do, what makes it notable or interesting?",
+  "estimated_value": "Market value range for a complete working example e.g. '$80–$200'",
+  "collectibility": "One of: High / Medium / Low — followed by a one-sentence reason",
+  "search_query": "A concise web image search query that would return clean stock reference photos of this exact item e.g. 'Zenith 6D030 tabletop radio vintage'"
+}"""
+
+
+def _appraise_object(
+    image_bytes: bytes,
+    provider:    str,
+    api_key:     str,
+) -> dict | None:
+    """
+    Send the photo to a vision AI with the appraisal prompt to identify the
+    whole device/item (not the broken part).  Returns a parsed dict or None.
+    """
+    img_b64  = base64.b64encode(image_bytes).decode()
+    usr_text = "Please identify and appraise the item shown in this photo."
+    raw: str | None = None
+
+    try:
+        if provider == "claude":
+            import anthropic
+            client = anthropic.Anthropic(api_key=api_key)
+            resp   = client.messages.create(
+                model      = "claude-opus-4-5",
+                max_tokens = 1024,
+                system     = _APPRAISAL_SYSTEM_PROMPT,
+                messages   = [{"role": "user", "content": [
+                    {"type": "image",
+                     "source": {"type": "base64", "media_type": "image/jpeg",
+                                "data": img_b64}},
+                    {"type": "text", "text": usr_text},
+                ]}],
+            )
+            raw = resp.content[0].text
+
+        elif provider == "openai":
+            from openai import OpenAI
+            client = OpenAI(api_key=api_key)
+            resp   = client.chat.completions.create(
+                model      = "gpt-4o",
+                max_tokens = 1024,
+                messages   = [
+                    {"role": "system", "content": _APPRAISAL_SYSTEM_PROMPT},
+                    {"role": "user", "content": [
+                        {"type": "image_url",
+                         "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}},
+                        {"type": "text", "text": usr_text},
+                    ]},
+                ],
+            )
+            raw = resp.choices[0].message.content
+
+        elif provider == "gemini":
+            _url = (
+                "https://generativelanguage.googleapis.com/v1beta/models/"
+                f"gemini-1.5-flash:generateContent?key={api_key}"
+            )
+            _r = requests.post(
+                _url,
+                json={
+                    "system_instruction": {"parts": [{"text": _APPRAISAL_SYSTEM_PROMPT}]},
+                    "contents": [{"parts": [
+                        {"inline_data": {"mime_type": "image/jpeg", "data": img_b64}},
+                        {"text": usr_text},
+                    ]}],
+                    "generationConfig": {"maxOutputTokens": 1024},
+                },
+                timeout=40,
+            )
+            _r.raise_for_status()
+            raw = _r.json()["candidates"][0]["content"]["parts"][0]["text"]
+
+    except Exception:
+        return None
+
+    if not raw:
+        return None
+    raw = raw.strip()
+    raw = re.sub(r"^```[a-z]*\n?", "", raw)
+    raw = re.sub(r"\n?```$", "", raw).strip()
+    try:
+        return json.loads(raw)
+    except Exception:
+        m = re.search(r"\{.*\}", raw, re.DOTALL)
+        if m:
+            try:
+                return json.loads(m.group())
+            except Exception:
+                pass
+    return None
+
+
+def _fetch_reference_image_url(query: str) -> str:
+    """
+    Use DuckDuckGo Instant Answer API to find a clean stock/reference image URL
+    for the identified object.  Returns "" on any failure.
+    """
+    if not query:
+        return ""
+    try:
+        r = requests.get(
+            "https://api.duckduckgo.com/",
+            params={
+                "q":             query,
+                "format":        "json",
+                "no_html":       "1",
+                "skip_disambig": "1",
+            },
+            timeout=7,
+        )
+        r.raise_for_status()
+        data = r.json()
+        # AbstractImage is the Wikipedia/source image — usually a clean photo
+        for field in ("AbstractImage", "Image", "Thumbnail"):
+            url = (data.get(field) or "").strip()
+            if url and url.startswith("http"):
+                return url
+        # Fall back to first related-topic icon
+        for topic in data.get("RelatedTopics", []):
+            if isinstance(topic, dict):
+                url = (topic.get("Icon", {}).get("URL") or "").strip()
+                if url and url.startswith("http"):
+                    return url
+    except Exception:
+        pass
+    return ""
 
 
 def _vision_ai_analyze(
@@ -1734,6 +1879,27 @@ if st.session_state.wizard_step == "identify":
                      icon="📸")
             st.stop()
 
+        # ── Phase 1: Appraise the whole item (vision AI only) ────────────────
+        _apr_prov = st.session_state.ai_provider
+        _apr_key  = st.session_state.api_key
+        if _apr_prov in ("claude", "openai", "gemini") and _apr_key and st.session_state.image_bytes:
+            with st.spinner("🔍 Identifying what we're looking at…"):
+                _apr = _appraise_object(
+                    st.session_state.image_bytes, _apr_prov, _apr_key
+                )
+            st.session_state.appraisal_result = _apr
+            if _apr and _apr.get("search_query"):
+                with st.spinner("🖼️ Fetching a reference image…"):
+                    st.session_state.appraisal_image_url = _fetch_reference_image_url(
+                        _apr["search_query"]
+                    )
+            else:
+                st.session_state.appraisal_image_url = ""
+        else:
+            st.session_state.appraisal_result    = None
+            st.session_state.appraisal_image_url = ""
+
+        # ── Phase 2: Identify the specific part and match template ────────────
         with st.spinner("⏳ Getting things ready — the AI is starting up and may take up to 30 seconds on first use. Hang tight!"):
             _result = analyze_input(
                 image_bytes  = st.session_state.image_bytes,
@@ -2327,9 +2493,79 @@ if st.session_state.wizard_step == "results":
     if not tmpl:
         tmpl = INTERNAL_TEMPLATES[0]
 
+    # ── Appraisal: "What we see" ──────────────────────────────────────────────
+    _apr = st.session_state.get("appraisal_result")
+    if _apr and isinstance(_apr, dict) and _apr.get("object_name"):
+        st.markdown("### 🔍 What we see")
+
+        _photo_col, _ref_col = st.columns(2)
+        with _photo_col:
+            _submitted_preview = st.session_state.captured_images
+            if _submitted_preview:
+                st.image(
+                    _submitted_preview[0]["bytes"],
+                    caption="Your photo",
+                    use_container_width=True,
+                )
+        with _ref_col:
+            _ref_url = st.session_state.get("appraisal_image_url", "")
+            if _ref_url:
+                try:
+                    st.image(_ref_url, caption="Reference image", use_container_width=True)
+                except Exception:
+                    pass
+            else:
+                st.markdown(
+                    '<div style="height:100%;display:flex;align-items:center;'
+                    'justify-content:center;background:#f0f4f8;border-radius:8px;'
+                    'padding:20px;text-align:center;color:#7a9ab8;font-size:13px">'
+                    'Reference image not available</div>',
+                    unsafe_allow_html=True,
+                )
+
+        st.markdown(f"#### {_apr.get('object_name', '')}")
+
+        _yr_col, _val_col, _col_col = st.columns(3)
+        _yr_col.markdown(
+            f'<div style="background:#e8f4fd;border-radius:8px;padding:10px;text-align:center">'
+            f'<div style="font-size:11px;color:#5a7fa8;font-weight:600;text-transform:uppercase;letter-spacing:0.5px">📅 Year / Era</div>'
+            f'<div style="font-size:16px;font-weight:700;color:#1a3a5c;margin-top:4px">{_apr.get("estimated_year","—")}</div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+        _val_col.markdown(
+            f'<div style="background:#e8fdf0;border-radius:8px;padding:10px;text-align:center">'
+            f'<div style="font-size:11px;color:#2e7d32;font-weight:600;text-transform:uppercase;letter-spacing:0.5px">💰 Est. Value</div>'
+            f'<div style="font-size:16px;font-weight:700;color:#1b5e20;margin-top:4px">{_apr.get("estimated_value","—")}</div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+        _raw_col = _apr.get("collectibility", "—")
+        _col_color = "#fff3e0" if "High" in _raw_col else ("#f3e5f5" if "Medium" in _raw_col else "#fafafa")
+        _col_txt   = "#e65100" if "High" in _raw_col else ("#6a1b9a" if "Medium" in _raw_col else "#555")
+        _col_col.markdown(
+            f'<div style="background:{_col_color};border-radius:8px;padding:10px;text-align:center">'
+            f'<div style="font-size:11px;color:{_col_txt};font-weight:600;text-transform:uppercase;letter-spacing:0.5px">⭐ Collectibility</div>'
+            f'<div style="font-size:15px;font-weight:700;color:{_col_txt};margin-top:4px">{_raw_col.split("—")[0].strip()}</div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
+        _desc = _apr.get("brief_description", "")
+        if _desc:
+            st.markdown(
+                f'<div style="background:#f7f9fc;border-left:4px solid #a8dadc;'
+                f'border-radius:0 8px 8px 0;padding:12px 16px;margin:12px 0;'
+                f'font-size:14px;color:#333;line-height:1.6">{_desc}</div>',
+                unsafe_allow_html=True,
+            )
+
+        st.markdown("---")
+
     # ── Submitted photos ──────────────────────────────────────────────────────
     _submitted = st.session_state.captured_images
-    if _submitted:
+    if _submitted and not _apr:
+        # Only show the photo strip here when there's no appraisal (appraisal shows it above)
         _pcols = st.columns(min(len(_submitted), 4))
         for _pc, _img in zip(_pcols, _submitted[:4]):
             _pc.image(_img["bytes"], caption="Your photo", use_container_width=True)
