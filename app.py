@@ -628,6 +628,13 @@ button[data-testid="stBaseButton-secondary"][key="nav_fwd"] {
 div[data-testid="stExpander"] summary {
     cursor: pointer !important;
 }
+/* Remove box/border from the landing "How it works" expander (empty label) */
+div[data-testid="stExpander"]:has(summary:empty),
+div[data-testid="stExpander"]:has(summary p:empty) {
+    border: none !important;
+    box-shadow: none !important;
+    background: transparent !important;
+}
 /* Pointer cursor on selectbox/dropdown */
 div[data-testid="stSelectbox"] > div {
     cursor: pointer !important;
@@ -1625,6 +1632,11 @@ if st.session_state.wizard_step == "identify":
     )
 
     # ── Photo input — camera OR upload ────────────────────────────────────────
+    st.caption(
+        "📐 **Photo tips:** Place a quarter or credit card next to your part so the AI "
+        "can understand the scale. For best results, take one photo from the top and "
+        "one from the side."
+    )
     tab_cam, tab_upload = st.tabs(["📷 Take Photo", "🖼️ Upload Photos"])
 
     # Helper: set of hashes already in the list (prevents duplicates)
