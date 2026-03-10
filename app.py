@@ -631,10 +631,13 @@ _DEFAULTS: dict = {
     "api_key":            "",          # HF / Claude / OpenAI token
     "ai_provider":        "hf",        # hf (default) | claude | openai | none
     "camera_enabled":     False,       # camera only starts after explicit click
-    "show_refinement":    False,       # toggle refinement panel in results step
-    "show_buy_links":     False,       # toggle buy-links panel in results step
-    "market_result":      None,        # dict from _market_search()
-    "buy_search_query":   "",          # editable query in the buy panel
+    "show_refinement":      False,       # toggle refinement panel in results step
+    "show_buy_links":       False,       # toggle buy-links panel in results step
+    "market_result":        None,        # dict from _market_search()
+    "buy_search_query":     "",          # editable query in the buy panel
+    "reanalyse_triggered":  False,       # triggers deep AI re-analysis
+    "enhance_diagram_triggered": False,  # triggers AI SVG enhancement
+    "enhanced_svg":         "",          # AI-enhanced blueprint SVG
 }
 
 for _k, _v in _DEFAULTS.items():
@@ -1060,6 +1063,26 @@ def _vision_ai_analyze(
         except Exception as exc:
             return {"_error": str(exc)}
 
+    elif provider == "gemini":
+        try:
+            _url = (
+                "https://generativelanguage.googleapis.com/v1beta/models/"
+                f"gemini-1.5-flash:generateContent?key={api_key}"
+            )
+            _payload = {
+                "system_instruction": {"parts": [{"text": _VISION_SYSTEM_PROMPT}]},
+                "contents": [{"parts": [
+                    {"inline_data": {"mime_type": "image/jpeg", "data": img_b64}},
+                    {"text": user_text},
+                ]}],
+                "generationConfig": {"maxOutputTokens": 2048},
+            }
+            _r = requests.post(_url, json=_payload, timeout=40)
+            _r.raise_for_status()
+            raw = _r.json()["candidates"][0]["content"]["parts"][0]["text"]
+        except Exception as exc:
+            return {"_error": str(exc)}
+
     else:
         return None
 
@@ -1103,8 +1126,8 @@ def analyze_input(
     warning = ""
     method  = "keyword"
 
-    # ── Path A: Vision AI (Claude / OpenAI) — richest result ─────────────────
-    if ai_provider in ("claude", "openai") and image_bytes and hf_token:
+    # ── Path A: Vision AI (Claude / OpenAI / Gemini) — richest result ─────────
+    if ai_provider in ("claude", "openai", "gemini") and image_bytes and hf_token:
         vision = _vision_ai_analyze(image_bytes, description, ai_provider, hf_token)
         if vision and "_error" not in vision:
             tid  = vision.get("template_id", "")
@@ -1268,6 +1291,80 @@ def _fetch_part_images(part_name: str, max_images: int = 3) -> list[str]:
         return urls[:max_images]
     except Exception:
         return []
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# AI DIAGRAM ENHANCEMENT  — ask AI to generate a richer annotated SVG
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _enhance_diagram_with_ai(
+    part_name:        str,
+    part_description: str,
+    template_name:    str,
+    dim_values:       dict,
+    provider:         str,
+    api_key:          str,
+) -> str:
+    """
+    Ask the selected AI model (text-only) to produce a detailed annotated
+    SVG blueprint.  Returns the SVG string or "" on any failure.
+    """
+    dims_text = ", ".join(f"{k}={v}mm" for k, v in dim_values.items()) or "unknown"
+    prompt = (
+        f"Generate a clean, detailed technical SVG blueprint for this 3D-printable part.\n\n"
+        f"Part: {part_name or template_name}\n"
+        f"Description: {part_description or template_name}\n"
+        f"Key dimensions: {dims_text}\n\n"
+        f"Requirements:\n"
+        f"- Dark navy background (#0d1b2a), viewBox=\"0 0 400 300\"\n"
+        f"- White/cyan construction lines (#00e5ff)\n"
+        f"- Red dimension annotation lines and text (#ff1744)\n"
+        f"- Label ALL key dimensions with arrows and mm values\n"
+        f"- Include both a top view and a side/front view\n"
+        f"- No external references, no filters, no clipPath\n\n"
+        f"Output ONLY the raw SVG code — no markdown, no prose."
+    )
+    raw = ""
+    try:
+        if provider == "claude":
+            import anthropic
+            client = anthropic.Anthropic(api_key=api_key)
+            resp   = client.messages.create(
+                model="claude-opus-4-5", max_tokens=2048,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            raw = resp.content[0].text
+        elif provider == "openai":
+            from openai import OpenAI
+            client = OpenAI(api_key=api_key)
+            resp   = client.chat.completions.create(
+                model="gpt-4o", max_tokens=2048,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            raw = resp.choices[0].message.content
+        elif provider == "gemini":
+            _url = (
+                "https://generativelanguage.googleapis.com/v1beta/models/"
+                f"gemini-1.5-flash:generateContent?key={api_key}"
+            )
+            _r = requests.post(
+                _url,
+                json={"contents": [{"parts": [{"text": prompt}]}],
+                      "generationConfig": {"maxOutputTokens": 2048}},
+                timeout=40,
+            )
+            _r.raise_for_status()
+            raw = _r.json()["candidates"][0]["content"]["parts"][0]["text"]
+    except Exception:
+        return ""
+
+    if not raw:
+        return ""
+    raw = raw.strip()
+    raw = re.sub(r"^```[a-z]*\n?", "", raw)
+    raw = re.sub(r"\n?```$", "", raw).strip()
+    m = re.search(r"<svg[\s\S]*?</svg>", raw, re.IGNORECASE)
+    return m.group() if m else ""
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1557,11 +1654,14 @@ if st.session_state.wizard_step == "identify":
                 _mq, _result.get("object_type", "")
             )
 
-        st.session_state.identify_result   = _result
-        st.session_state.selected_template = tmpl_get(_result["template_id"])
-        st.session_state.dim_values        = _result["suggested_dims"]
-        st.session_state.show_buy_links    = False
-        st.session_state.buy_search_query  = ""
+        st.session_state.identify_result         = _result
+        st.session_state.selected_template       = tmpl_get(_result["template_id"])
+        st.session_state.dim_values              = _result["suggested_dims"]
+        st.session_state.show_buy_links          = False
+        st.session_state.buy_search_query        = ""
+        st.session_state.reanalyse_triggered     = False
+        st.session_state.enhance_diagram_triggered = False
+        st.session_state.enhanced_svg            = ""
         _go("results")
 
     # ── Power-user upgrade panel (hidden by default) ──────────────────────────
@@ -2182,7 +2282,7 @@ if st.session_state.wizard_step == "results":
         )
 
         # Decision row
-        d_print, d_buy = st.columns(2)
+        d_print, d_buy, d_ai = st.columns(3)
         with d_print:
             if st.button("🖨️ Print it — let's go!",
                          use_container_width=True, type="primary"):
@@ -2192,7 +2292,42 @@ if st.session_state.wizard_step == "results":
         with d_buy:
             if st.button("🛒 I'll buy the original",
                          use_container_width=True):
-                st.session_state.show_buy_links = True
+                st.session_state.show_buy_links    = True
+                st.session_state.reanalyse_triggered = False
+                st.rerun()
+        with d_ai:
+            if st.button("🤖 Reanalyse with AI",
+                         use_container_width=True,
+                         help="Get a deeper blueprint using Claude, GPT-4o, or Gemini"):
+                st.session_state.show_buy_links      = False
+                st.session_state.reanalyse_triggered = True
+                st.rerun()
+
+        # ── Reanalyse panel ───────────────────────────────────────────────────
+        if st.session_state.get("reanalyse_triggered"):
+            _prov = st.session_state.ai_provider
+            _key  = st.session_state.api_key
+            if _prov not in ("claude", "openai", "gemini") or not _key:
+                st.warning(
+                    "To use this feature, expand **⚙️ AI Settings** above "
+                    "and add a Claude, GPT-4o, or free Gemini API key."
+                )
+                if st.button("⚙️ Go to AI Settings", key="_go_ai_settings"):
+                    st.session_state.reanalyse_triggered = False
+                    _go("identify")
+            else:
+                with st.spinner("🤖 Running deep AI analysis — this may take up to 30 seconds…"):
+                    _new_result = analyze_input(
+                        image_bytes = st.session_state.image_bytes,
+                        description = st.session_state.vibe_description,
+                        hf_token    = _key,
+                        ai_provider = _prov,
+                    )
+                st.session_state.identify_result   = _new_result
+                st.session_state.selected_template = tmpl_get(_new_result["template_id"])
+                st.session_state.dim_values        = _new_result["suggested_dims"]
+                st.session_state.reanalyse_triggered = False
+                st.session_state.enhanced_svg      = ""
                 st.rerun()
 
         if st.session_state.get("show_buy_links"):
@@ -2274,21 +2409,62 @@ if st.session_state.wizard_step == "results":
 
     # ── Measurement diagram ───────────────────────────────────────────────────
     st.markdown("#### 📐 Measurement diagram")
-    _ai_svg = res.get("ai_svg", "")
-    if _ai_svg and _ai_svg.strip().startswith("<svg"):
-        # Vision AI returned a blueprint — display it directly
+
+    # Run AI enhancement if triggered
+    if st.session_state.get("enhance_diagram_triggered"):
+        _eprov = st.session_state.ai_provider
+        _ekey  = st.session_state.api_key
+        if _eprov not in ("claude", "openai", "gemini") or not _ekey:
+            st.warning(
+                "To enhance the diagram, expand **⚙️ AI Settings** above "
+                "and add a Claude, GPT-4o, or free Gemini API key."
+            )
+            st.session_state.enhance_diagram_triggered = False
+        else:
+            with st.spinner("✨ Generating enhanced blueprint…"):
+                _esvg = _enhance_diagram_with_ai(
+                    part_name        = res.get("part_name", ""),
+                    part_description = res.get("part_description", "") or res.get("project_description", ""),
+                    template_name    = tmpl["name"],
+                    dim_values       = st.session_state.dim_values,
+                    provider         = _eprov,
+                    api_key          = _ekey,
+                )
+            st.session_state.enhanced_svg = _esvg
+            st.session_state.enhance_diagram_triggered = False
+            st.rerun()
+
+    # Display: prefer enhanced → AI vision → template fallback
+    _display_svg = (
+        st.session_state.get("enhanced_svg")
+        or res.get("ai_svg", "")
+    )
+    if _display_svg and _display_svg.strip().startswith("<svg"):
+        _caption = (
+            "✨ Enhanced blueprint generated by AI."
+            if st.session_state.get("enhanced_svg")
+            else "Blueprint generated by AI vision analysis."
+        )
         st.markdown(
             f'<div style="text-align:center;margin:8px 0;'
-            f'border-radius:10px;overflow:hidden">{_ai_svg}</div>',
+            f'border-radius:10px;overflow:hidden">{_display_svg}</div>',
             unsafe_allow_html=True,
         )
-        st.caption("Blueprint generated by AI vision analysis.")
+        st.caption(_caption)
     else:
         svg_html = part_svg(tmpl["id"], st.session_state.dim_values)
         st.markdown(
             f'<div style="text-align:center;margin:8px 0">{svg_html}</div>',
             unsafe_allow_html=True,
         )
+
+    # Enhance button
+    _enh_col, _ = st.columns([1, 2])
+    with _enh_col:
+        if st.button("✨ Enhance diagram with AI", use_container_width=True,
+                     help="Generate a more detailed annotated blueprint using AI"):
+            st.session_state.enhance_diagram_triggered = True
+            st.rerun()
 
     # ── Confirmation buttons ──────────────────────────────────────────────────
     st.markdown("**Does this look right?**")
