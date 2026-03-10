@@ -686,6 +686,8 @@ _DEFAULTS: dict = {
     "enhance_diagram_expanded": False,   # auto-open the details expander after generation
     "appraisal_result":     None,        # dict from _appraise_object()
     "appraisal_image_url":  "",          # reference image URL from DDG
+    "appraisal_correction": "",          # user correction to the appraisal
+    "repair_intent":        "",          # what the user wants to fix/replace
     "nav_confirm_home":     False,       # show "go home?" confirmation on Step 1 back
     "api_key_status":       "",          # "" | "active:{prov}" | "cleared"
     "_api_key_committed":   "",          # last saved/entered key value (for Enter detection)
@@ -2559,6 +2561,41 @@ if st.session_state.wizard_step == "results":
                 f'font-size:14px;color:#333;line-height:1.6">{_desc}</div>',
                 unsafe_allow_html=True,
             )
+
+        st.markdown("---")
+
+        # ── Repair validation inputs ──────────────────────────────────────────
+        st.markdown("#### ✏️ Let's make sure we've got this right")
+
+        _correction = st.text_input(
+            "Did we get that right? Add any missing details:",
+            value=st.session_state.get("appraisal_correction", ""),
+            placeholder="e.g., 'It is actually a 1941 model' or 'This is a Singer 66 sewing machine'",
+            key="_appraisal_correction_input",
+        )
+        _repair = st.text_input(
+            "What are we trying to fix or replace on this item today?",
+            value=st.session_state.get("repair_intent", ""),
+            placeholder="e.g., 'I need to replace the missing tuning knob on the right'",
+            key="_repair_intent_input",
+        )
+
+        if st.button("🛠️ Create Repair Strategy",
+                     type="primary", use_container_width=True,
+                     key="_create_strategy_btn"):
+            st.session_state.appraisal_correction = _correction.strip()
+            st.session_state.repair_intent        = _repair.strip()
+            st.rerun()
+
+        # Show a confirmation badge once the user has submitted their intent
+        if st.session_state.get("repair_intent"):
+            st.success(
+                f"✅ **Repair goal saved:** {st.session_state.repair_intent}"
+            )
+            if st.session_state.get("appraisal_correction"):
+                st.caption(
+                    f"📝 Your correction: {st.session_state.appraisal_correction}"
+                )
 
         st.markdown("---")
 
