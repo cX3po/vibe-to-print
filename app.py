@@ -1805,11 +1805,13 @@ if st.session_state.wizard_step == "identify":
 """,
                 "gemini": """
 **How to get your free Google Gemini API key:**
-1. Go to [aistudio.google.com](https://aistudio.google.com)
-2. Sign in with your Google account
-3. Click **"Get API key"** in the top left
-4. Click **"Create API key"**
-5. Copy the key and paste it above
+1. Click this link to open Google AI Studio: [aistudio.google.com/api-keys](https://aistudio.google.com/api-keys)
+2. Sign in with any Google account (Gmail works)
+3. Click the blue **"Create API key"** button on the left side
+4. Select **"Create API key in new project"** from the popup
+5. Your new key will appear — click the **copy icon** (📋) next to it
+6. Come back here and paste it into the field above
+7. Click **"Save Key"** — you'll see a green confirmation when it's active
 """,
             }
             st.markdown(_instructions[_prov])
