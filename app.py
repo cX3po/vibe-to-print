@@ -1472,7 +1472,7 @@ if st.session_state.wizard_step == "identify":
             unsafe_allow_html=True,
         )
 
-    if st.button("🔍 Analyse & Find Best Match",
+    if st.button("✨ Analyse My Part",
                  type="primary",
                  use_container_width=True):
 
