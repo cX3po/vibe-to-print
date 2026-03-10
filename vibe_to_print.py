@@ -756,42 +756,35 @@ if st.session_state.wizard_step == "welcome":
             _go("identify")
 
     # ── How it works ──────────────────────────────────────────────────────────
-    with st.expander("▶ How it works — click to see"):
+    st.markdown(
+        '<div style="text-align:center;margin-top:1.5rem;font-size:0.9rem;'
+        'color:#7eb8d4">How it works ↓</div>',
+        unsafe_allow_html=True,
+    )
+    with st.expander(""):
         st.markdown("""
-<div style="margin-top:1rem;text-align:center">
-  <div style="display:flex;justify-content:center;align-items:flex-start;
-              gap:0;flex-wrap:wrap">
+**Step 1 — Snap or upload a photo**
 
-    <div style="flex:1;min-width:120px;max-width:180px;padding:0 8px;
-                text-align:center">
-      <div style="font-size:2rem;margin-bottom:.4rem">📸</div>
-      <div style="color:#e0e0e0;font-size:.82rem;line-height:1.4">
-        Snap or upload a photo of the broken part</div>
-    </div>
+Take a photo of the broken or missing part, or upload one from your device. You can submit multiple photos for better accuracy.
 
-    <div style="padding-top:1rem;color:#4a7fa5;font-size:1.2rem;
-                flex-shrink:0;align-self:flex-start;margin-top:.2rem">→</div>
+---
 
-    <div style="flex:1;min-width:120px;max-width:180px;padding:0 8px;
-                text-align:center">
-      <div style="font-size:2rem;margin-bottom:.4rem">✍️</div>
-      <div style="color:#e0e0e0;font-size:.82rem;line-height:1.4">
-        Describe what you need</div>
-    </div>
+**Step 2 — Describe what you need**
 
-    <div style="padding-top:1rem;color:#4a7fa5;font-size:1.2rem;
-                flex-shrink:0;align-self:flex-start;margin-top:.2rem">→</div>
+Type a short description of what the part does or what you're trying to replace. For example: "the knob that fell off my oven dial."
 
-    <div style="flex:1;min-width:120px;max-width:180px;padding:0 8px;
-                text-align:center">
-      <div style="font-size:2rem;margin-bottom:.4rem">🖨️</div>
-      <div style="color:#e0e0e0;font-size:.82rem;line-height:1.4">
-        Download your 3D-printable design</div>
-    </div>
+---
 
-  </div>
-</div>
-""", unsafe_allow_html=True)
+**Step 3 — AI analyses your part**
+
+The app identifies the part, its measurements, and generates a 3D-printable design file automatically — no CAD skills needed.
+
+---
+
+**Step 4 — Print it or buy it**
+
+Download the design file to 3D print the part yourself, or use the search links to find and buy the original part online.
+""")
 
     st.stop()
 
