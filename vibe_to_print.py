@@ -2993,93 +2993,81 @@ if st.session_state.wizard_step == "dimensions":
 
     # ── Header ───────────────────────────────────────────────────────────────
     st.markdown(f"### ✅ Ready to print: {tmpl['name']}")
-    st.caption("Review the code, export, and save your project.")
+    st.caption("Your design is ready. Download the STL and open it in your slicer to print.")
 
-    # ── OpenSCAD code block ───────────────────────────────────────────────────
-    with st.expander("📄 OpenSCAD code", expanded=True):
-        st.code(scad_code, language="cpp")
+    # ── Auto-compile STL (runs once per unique SCAD, using server OpenSCAD) ──
+    _scad_hash = hashlib.md5(scad_code.encode()).hexdigest()
+    if st.session_state.get("_stl_scad_hash") != _scad_hash:
+        _osc_path = _find_openscad()
+        if _osc_path:
+            with st.spinner("⚙️ Compiling your design to STL — this takes a few seconds…"):
+                _stl_bytes, _stl_err = _compile_stl(scad_code, _osc_path)
+            if _stl_err:
+                st.session_state["_stl_bytes"]      = None
+                st.session_state["_stl_compile_err"] = _stl_err
+            else:
+                st.session_state["_stl_bytes"]       = _stl_bytes
+                st.session_state["_stl_compile_err"] = ""
+            st.session_state["_stl_scad_hash"] = _scad_hash
 
-    # ── Export ────────────────────────────────────────────────────────────────
+    if st.session_state.get("_stl_compile_err"):
+        st.error(f"Compile error: {st.session_state['_stl_compile_err']}")
+
+    # ── Export buttons ────────────────────────────────────────────────────────
     st.markdown("#### 📦 Export")
-    col_scad, col_stl = st.columns(2)
 
-    with col_scad:
+    if st.session_state.get("_stl_bytes"):
+        # Primary: STL
         st.download_button(
-            "⬇️ Download .SCAD",
+            "⬇️ Download STL file",
+            data=st.session_state["_stl_bytes"],
+            file_name=f"{filename_base}.stl",
+            mime="model/stl",
+            use_container_width=True,
+            type="primary",
+        )
+    else:
+        # OpenSCAD not available on this server — offer SCAD as primary
+        st.download_button(
+            "⬇️ Download .SCAD design file",
             data=scad_code.encode("utf-8"),
             file_name=f"{filename_base}.scad",
             mime="text/plain",
             use_container_width=True,
             type="primary",
         )
+        st.info(
+            "**STL auto-compile unavailable on this server.**  \n"
+            "Download the `.scad` file above, open it in "
+            "[OpenSCAD](https://openscad.org/downloads.html), "
+            "press **F6** to render, then **File → Export → Export as STL**."
+        )
 
-    with col_stl:
-        openscad_path = _find_openscad()
-        if openscad_path:
-            if st.button("⚙️ Compile to STL", use_container_width=True):
-                with st.spinner("Compiling with OpenSCAD — this may take a moment…"):
-                    stl_bytes, err = _compile_stl(scad_code, openscad_path)
-                if err:
-                    st.error(f"Compile error: {err}")
-                else:
-                    st.session_state["_stl_bytes"] = stl_bytes
-                    st.session_state["_gcode_bytes"] = None
-                    st.rerun()
-
-            if st.session_state.get("_stl_bytes"):
-                st.download_button(
-                    "⬇️ Download STL",
-                    data=st.session_state["_stl_bytes"],
-                    file_name=f"{filename_base}.stl",
-                    mime="model/stl",
-                    use_container_width=True,
-                )
-        else:
-            st.info(
-                "**OpenSCAD not installed.**\n\n"
-                "1. Download from [openscad.org](https://openscad.org/downloads.html)\n"
-                "2. Open the `.scad` file above\n"
-                "3. Press **F6** to render, then **File → Export → Export as STL**",
-                icon="ℹ️",
-            )
-
-    # Slice section (shown below the two-column row when an STL is ready)
+    # Secondary: always offer SCAD for reference / editing
     if st.session_state.get("_stl_bytes"):
-        slicer = _find_slicer()
-        if slicer:
-            slicer_name, slicer_path = slicer
-            st.markdown("---")
-            col_slice, col_gcode = st.columns(2)
-            with col_slice:
-                if st.button(
-                    f"🔪 Slice with {slicer_name}",
-                    use_container_width=True,
-                ):
-                    with st.spinner(f"Slicing with {slicer_name}…"):
-                        gcode_bytes, err2 = _slice_stl(
-                            st.session_state["_stl_bytes"],
-                            slicer_name, slicer_path,
-                        )
-                    if err2:
-                        st.error(f"Slice error: {err2}")
-                    else:
-                        st.session_state["_gcode_bytes"] = gcode_bytes
-                        st.rerun()
-            with col_gcode:
-                if st.session_state.get("_gcode_bytes"):
-                    st.download_button(
-                        "⬇️ Download G-code",
-                        data=st.session_state["_gcode_bytes"],
-                        file_name=f"{filename_base}.gcode",
-                        mime="text/plain",
-                        use_container_width=True,
-                        type="primary",
-                    )
-        else:
-            st.caption(
-                "No slicer found on this machine. "
-                "Open the STL in PrusaSlicer, Cura, or OrcaSlicer to generate G-code."
+        with st.expander("🔧 Also download the editable .SCAD source"):
+            st.download_button(
+                "⬇️ Download .SCAD",
+                data=scad_code.encode("utf-8"),
+                file_name=f"{filename_base}.scad",
+                mime="text/plain",
+                use_container_width=True,
             )
+
+    # ── What to do next ───────────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("#### 🖨️ What to do next")
+    st.markdown(
+        "1. **Download your STL file** using the button above.\n"
+        "2. **Open it in your slicer software** — Cura, Bambu Studio, or PrusaSlicer "
+        "will convert it to G-code automatically.\n"
+        "3. **Send it to your printer** — save the G-code to a USB stick or send it "
+        "via Wi-Fi directly to your printer."
+    )
+
+    # ── OpenSCAD code (collapsed by default) ─────────────────────────────────
+    with st.expander("📄 View OpenSCAD source code"):
+        st.code(scad_code, language="cpp")
 
     # ── Project management ────────────────────────────────────────────────────
     st.markdown("---")
@@ -3116,8 +3104,8 @@ if st.session_state.wizard_step == "dimensions":
     col_back, col_new = st.columns(2)
     with col_back:
         if st.button("← Back to measurements", use_container_width=True):
-            st.session_state["_stl_bytes"]   = None
-            st.session_state["_gcode_bytes"] = None
+            st.session_state["_stl_bytes"]     = None
+            st.session_state["_stl_scad_hash"] = ""
             _go("results")
     with col_new:
         if st.button("🔄 Start New Project", use_container_width=True):
