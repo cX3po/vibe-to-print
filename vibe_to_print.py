@@ -627,6 +627,10 @@ for _k, _v in _DEFAULTS.items():
     if _k not in st.session_state:
         st.session_state[_k] = _v
 
+# Force HF as provider — migrate any old session values
+if st.session_state.ai_provider in ("none", "ollama", ""):
+    st.session_state.ai_provider = "hf"
+
 
 def _go(step: str) -> None:
     st.session_state.wizard_step = step
@@ -1346,21 +1350,16 @@ if st.session_state.wizard_step == "identify":
         st.session_state.show_buy_links    = False
         _go("results")
 
-    # ── Optional AI settings (collapsed by default) ───────────────────────────
-    with st.expander("⚙️ Advanced AI settings"):
-        st.caption(
-            "The app uses **Hugging Face** by default — no setup needed. "
-            "Add a free token below for higher rate limits, or upgrade to "
-            "Claude/GPT-4o for full forensic analysis."
-        )
-
+    # ── Power-user upgrade panel (hidden by default) ──────────────────────────
+    with st.expander("⚙️ Upgrade AI (optional)"):
+        st.caption("App already uses Hugging Face automatically. "
+                   "Add a Claude or GPT-4o key for full forensic blueprints.")
         _providers = [
-            "hf — Hugging Face (default, free)",
-            "claude — Anthropic Claude (best analysis ✨)",
-            "openai — GPT-4o (vision analysis ✨)",
-            "none — keyword matching only (offline)",
+            "hf — Hugging Face (active)",
+            "claude — Anthropic Claude ✨",
+            "openai — GPT-4o ✨",
         ]
-        _pkeys = ["hf", "claude", "openai", "none"]
+        _pkeys = ["hf", "claude", "openai"]
         _cur   = st.session_state.ai_provider
         _idx   = _pkeys.index(_cur) if _cur in _pkeys else 0
         _provider = st.selectbox("AI brain", _providers, index=_idx,
@@ -1368,41 +1367,16 @@ if st.session_state.wizard_step == "identify":
         st.session_state.ai_provider = _provider.split()[0]
         _prov = st.session_state.ai_provider
 
-        if _prov == "hf":
-            _tok = st.text_input(
-                "Hugging Face token (optional — raises rate limits)",
-                value=st.session_state.api_key,
-                type="password",
-                placeholder="hf_…",
-                help="Free at huggingface.co/settings/tokens",
-            )
+        if _prov == "claude":
+            _tok = st.text_input("Anthropic API key", type="password",
+                                 value=st.session_state.api_key,
+                                 placeholder="sk-ant-…")
             st.session_state.api_key = _tok
-            st.caption(
-                "Vision: `Salesforce/blip-image-captioning-large`  \n"
-                "Text: `HuggingFaceH4/zephyr-7b-beta`"
-            )
-        elif _prov == "claude":
-            _tok = st.text_input(
-                "Anthropic API key",
-                value=st.session_state.api_key,
-                type="password",
-                placeholder="sk-ant-…",
-                help="console.anthropic.com",
-            )
-            st.session_state.api_key = _tok
-            st.caption("Uses **claude-opus-4-5** — full forensic analysis + blueprint SVG.")
         elif _prov == "openai":
-            _tok = st.text_input(
-                "OpenAI API key",
-                value=st.session_state.api_key,
-                type="password",
-                placeholder="sk-…",
-                help="platform.openai.com",
-            )
+            _tok = st.text_input("OpenAI API key", type="password",
+                                 value=st.session_state.api_key,
+                                 placeholder="sk-…")
             st.session_state.api_key = _tok
-            st.caption("Uses **gpt-4o** — full forensic analysis + blueprint SVG.")
-        else:
-            st.caption("Keyword matching only — no network calls during analysis.")
 
     st.stop()
 
