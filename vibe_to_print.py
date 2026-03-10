@@ -674,9 +674,10 @@ if st.session_state.wizard_step == "welcome":
 # ══════════════════════════════════════════════════════════════════════════════
 
 # ── Hugging Face model config ─────────────────────────────────────────────────
-# Paste your HF token below so users get higher rate-limits automatically.
-# Leave as "" to let the app work anonymously (slower cold-starts).
-_HF_TOKEN_DEFAULT = ""   # ← paste your token here, e.g. "hf_xxxxxxxxxxxx"
+# Token is read from Streamlit Cloud secrets (Settings → Secrets → HF_TOKEN).
+# For local dev, set the environment variable: export HF_TOKEN=hf_...
+import os as _os
+_HF_TOKEN_DEFAULT = _os.environ.get("HF_TOKEN", "")
 
 _BLIP_URL     = "https://api-inference.huggingface.co/models/Salesforce/blip-image-captioning-large"
 _HF_TEXT_MODEL = "HuggingFaceH4/zephyr-7b-beta"   # primary text model
