@@ -1416,6 +1416,7 @@ if st.session_state.wizard_step == "identify":
         label_visibility="visible",
     )
     st.session_state.vibe_description = description
+    st.caption("Describe the repair or replacement you need — e.g., a broken drawer knob, a cracked bracket.")
 
     st.divider()
 
