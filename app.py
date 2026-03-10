@@ -26,6 +26,17 @@ from pathlib import Path
 import requests
 import streamlit as st
 
+# ── Cookie-based key persistence (graceful fallback if package absent) ────────
+try:
+    from streamlit_cookies_controller import CookieController as _CookieController
+    _cookie_ctrl = _CookieController()
+    _COOKIES_OK  = True
+except Exception:
+    _cookie_ctrl = None
+    _COOKIES_OK  = False
+
+_COOKIE_KEY = "vtp_api_key"   # browser cookie name
+
 # ══════════════════════════════════════════════════════════════════════════════
 # INTERNAL TEMPLATES  (all 12 parametric OpenSCAD designs, embedded)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -678,11 +689,32 @@ _DEFAULTS: dict = {
     "nav_confirm_home":     False,       # show "go home?" confirmation on Step 1 back
     "api_key_status":       "",          # "" | "active:{prov}" | "cleared"
     "_api_key_committed":   "",          # last saved/entered key value (for Enter detection)
+    "settings_expanded":    False,       # controls AI Settings expander open/close
 }
 
 for _k, _v in _DEFAULTS.items():
     if _k not in st.session_state:
         st.session_state[_k] = _v
+
+# ── Load persisted API key from browser cookie on first run ───────────────────
+if _COOKIES_OK and not st.session_state.api_key:
+    try:
+        _saved_key = _cookie_ctrl.get(_COOKIE_KEY)
+        if _saved_key:
+            st.session_state.api_key           = _saved_key
+            st.session_state._api_key_committed = _saved_key
+            # Infer provider from key prefix so status badge is correct
+            if _saved_key.startswith("sk-ant-"):
+                st.session_state.ai_provider   = "claude"
+                st.session_state.api_key_status = "active:claude"
+            elif _saved_key.startswith("sk-"):
+                st.session_state.ai_provider   = "openai"
+                st.session_state.api_key_status = "active:openai"
+            elif _saved_key.startswith("AIza"):
+                st.session_state.ai_provider   = "gemini"
+                st.session_state.api_key_status = "active:gemini"
+    except Exception:
+        pass
 
 # Force HF as provider — migrate any old session values
 if st.session_state.ai_provider in ("none", "ollama", ""):
@@ -1810,7 +1842,8 @@ if st.session_state.wizard_step == "identify":
         _go("results")
 
     # ── Power-user upgrade panel (hidden by default) ──────────────────────────
-    with st.expander("⚙️ AI Settings (optional)"):
+    with st.expander("⚙️ AI Settings (optional)",
+                     expanded=st.session_state.settings_expanded):
 
         # ── Persistent status badge ────────────────────────────────────────────
         _ks = st.session_state.api_key_status
@@ -1841,12 +1874,21 @@ if st.session_state.wizard_step == "identify":
         _prov = st.session_state.ai_provider
 
         def _commit_key(key_value: str, provider: str) -> None:
-            """Save the key and update the status badge."""
+            """Save the key to session state, status badge, and browser cookie."""
             st.session_state.api_key            = key_value
             st.session_state._api_key_committed = key_value
             st.session_state.api_key_status     = (
                 f"active:{provider}" if key_value else "cleared"
             )
+            if _COOKIES_OK:
+                try:
+                    if key_value:
+                        _cookie_ctrl.set(_COOKIE_KEY, key_value,
+                                         max_age=30 * 24 * 3600)   # 30 days
+                    else:
+                        _cookie_ctrl.remove(_COOKIE_KEY)
+                except Exception:
+                    pass
 
         if _prov in ("claude", "openai", "gemini"):
             _labels       = {"claude": "Anthropic API key",
@@ -1869,6 +1911,7 @@ if st.session_state.wizard_step == "identify":
 
             if st.button("💾 Save Key", key="_save_key_btn"):
                 _commit_key(_tok, _prov)
+                st.session_state.settings_expanded = False
                 st.rerun()
 
             _instructions = {
