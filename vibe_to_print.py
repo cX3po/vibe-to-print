@@ -751,6 +751,45 @@ if st.session_state.wizard_step == "welcome":
         if st.button("🚀 Get Started", type="primary", use_container_width=True):
             _go("identify")
 
+    # ── How it works ──────────────────────────────────────────────────────────
+    st.markdown("""
+<div style="margin-top:2.5rem;text-align:center">
+  <div style="color:#4a7fa5;font-size:0.75rem;letter-spacing:.1em;
+              text-transform:uppercase;margin-bottom:1rem">How it works</div>
+  <div style="display:flex;justify-content:center;align-items:flex-start;
+              gap:0;flex-wrap:wrap">
+
+    <div style="flex:1;min-width:120px;max-width:180px;padding:0 8px;
+                text-align:center">
+      <div style="font-size:2rem;margin-bottom:.4rem">📸</div>
+      <div style="color:#e0e0e0;font-size:.82rem;line-height:1.4">
+        Snap or upload a photo of the broken part</div>
+    </div>
+
+    <div style="padding-top:1rem;color:#4a7fa5;font-size:1.2rem;
+                flex-shrink:0;align-self:flex-start;margin-top:.2rem">→</div>
+
+    <div style="flex:1;min-width:120px;max-width:180px;padding:0 8px;
+                text-align:center">
+      <div style="font-size:2rem;margin-bottom:.4rem">✍️</div>
+      <div style="color:#e0e0e0;font-size:.82rem;line-height:1.4">
+        Describe what you need</div>
+    </div>
+
+    <div style="padding-top:1rem;color:#4a7fa5;font-size:1.2rem;
+                flex-shrink:0;align-self:flex-start;margin-top:.2rem">→</div>
+
+    <div style="flex:1;min-width:120px;max-width:180px;padding:0 8px;
+                text-align:center">
+      <div style="font-size:2rem;margin-bottom:.4rem">🖨️</div>
+      <div style="color:#e0e0e0;font-size:.82rem;line-height:1.4">
+        Download your 3D-printable design</div>
+    </div>
+
+  </div>
+</div>
+""", unsafe_allow_html=True)
+
     st.stop()
 
 
