@@ -1133,6 +1133,7 @@ def _appraise_object(
     whole device/item (not the broken part).  Returns a parsed dict or None.
     """
     img_b64  = base64.b64encode(image_bytes).decode()
+    api_key  = api_key.strip()
     usr_text = "Please identify and appraise the item shown in this photo."
     raw: str | None = None
 
@@ -1258,6 +1259,7 @@ def _vision_ai_analyze(
     Returns None if provider is unsupported.
     """
     img_b64   = base64.b64encode(image_bytes).decode()
+    api_key   = api_key.strip()
     user_text = (f"User description: {description}" if description
                  else "Please analyse this part.")
 
@@ -1401,7 +1403,7 @@ def analyze_input(
                 "device_description":  vision.get("device_context", ""),
             }
         elif vision and "_error" in vision:
-            warning = "Deep analysis unavailable right now — using standard identification instead."
+            warning = f"AI Connection Failed: {vision['_error']}"
 
     # ── Path B: BLIP caption + HF text model ─────────────────────────────────
     if image_bytes:
