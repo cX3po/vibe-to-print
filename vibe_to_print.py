@@ -667,6 +667,8 @@ _DEFAULTS: dict = {
     "enhance_diagram_triggered": False,  # triggers AI SVG enhancement
     "enhanced_svg":         "",          # AI-enhanced blueprint SVG
     "nav_confirm_home":     False,       # show "go home?" confirmation on Step 1 back
+    "api_key_status":       "",          # "" | "active:{prov}" | "cleared"
+    "_api_key_committed":   "",          # last saved/entered key value (for Enter detection)
 }
 
 for _k, _v in _DEFAULTS.items():
@@ -1724,8 +1726,21 @@ if st.session_state.wizard_step == "identify":
 
     # ── Power-user upgrade panel (hidden by default) ──────────────────────────
     with st.expander("⚙️ AI Settings (optional)"):
+
+        # ── Persistent status badge ────────────────────────────────────────────
+        _ks = st.session_state.api_key_status
+        if _ks.startswith("active:"):
+            _active_prov = _ks.split(":", 1)[1]
+            _prov_label  = {"claude": "Anthropic Claude",
+                            "openai": "GPT-4o",
+                            "gemini": "Google Gemini"}.get(_active_prov, _active_prov)
+            st.success(f"✅ {_prov_label} key is active — enhanced analysis enabled.")
+        elif _ks == "cleared":
+            st.info("AI key removed — using default Hugging Face analysis.")
+
         st.caption("AI analysis works automatically out of the box. "
                    "Add a Claude, GPT-4o, or Gemini key for deeper, more detailed part identification.")
+
         _providers = [
             "hf — Hugging Face (active)",
             "claude — Anthropic Claude ✨",
@@ -1740,45 +1755,64 @@ if st.session_state.wizard_step == "identify":
         st.session_state.ai_provider = _provider.split()[0]
         _prov = st.session_state.ai_provider
 
-        if _prov == "claude":
-            _tok = st.text_input("Anthropic API key", type="password",
-                                 value=st.session_state.api_key,
-                                 placeholder="sk-ant-…")
-            st.session_state.api_key = _tok
-            st.markdown("""
+        def _commit_key(key_value: str, provider: str) -> None:
+            """Save the key and update the status badge."""
+            st.session_state.api_key            = key_value
+            st.session_state._api_key_committed = key_value
+            st.session_state.api_key_status     = (
+                f"active:{provider}" if key_value else "cleared"
+            )
+
+        if _prov in ("claude", "openai", "gemini"):
+            _labels       = {"claude": "Anthropic API key",
+                             "openai": "OpenAI API key",
+                             "gemini": "Google API key"}
+            _placeholders = {"claude": "sk-ant-…", "openai": "sk-…", "gemini": "AIza…"}
+
+            _tok = st.text_input(
+                _labels[_prov], type="password",
+                value=st.session_state.api_key,
+                placeholder=_placeholders[_prov],
+            )
+            # Detect Enter (value changed since last commit)
+            if _tok != st.session_state._api_key_committed:
+                _commit_key(_tok, _prov)
+            else:
+                st.session_state.api_key = _tok
+
+            st.caption("Paste your key above, then click **Save Key** or press Enter to activate.")
+
+            if st.button("💾 Save Key", key="_save_key_btn"):
+                _commit_key(_tok, _prov)
+                st.rerun()
+
+            _instructions = {
+                "claude": """
 **How to get your Anthropic API key:**
 1. Go to [console.anthropic.com](https://console.anthropic.com)
 2. Sign in or create a free account
 3. Click **"API Keys"** in the left sidebar
 4. Click **"Create Key"**, give it a name, and copy it
 5. Paste the key above
-""")
-        elif _prov == "openai":
-            _tok = st.text_input("OpenAI API key", type="password",
-                                 value=st.session_state.api_key,
-                                 placeholder="sk-…")
-            st.session_state.api_key = _tok
-            st.markdown("""
+""",
+                "openai": """
 **How to get your OpenAI API key:**
 1. Go to [platform.openai.com/api-keys](https://platform.openai.com/api-keys)
 2. Sign in or create an account
 3. Click **"Create new secret key"**
 4. Copy the key immediately (you won't see it again)
 5. Paste the key above
-""")
-        elif _prov == "gemini":
-            _tok = st.text_input("Google API key", type="password",
-                                 value=st.session_state.api_key,
-                                 placeholder="AIza…")
-            st.session_state.api_key = _tok
-            st.markdown("""
+""",
+                "gemini": """
 **How to get your free Google Gemini API key:**
 1. Go to [aistudio.google.com](https://aistudio.google.com)
 2. Sign in with your Google account
 3. Click **"Get API key"** in the top left
 4. Click **"Create API key"**
 5. Copy the key and paste it above
-""")
+""",
+            }
+            st.markdown(_instructions[_prov])
 
     st.stop()
 
