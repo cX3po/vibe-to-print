@@ -618,6 +618,7 @@ _DEFAULTS: dict = {
     "scad_code":          "",
     "api_key":            "",          # HF / Claude / OpenAI token
     "ai_provider":        "hf",        # hf (default) | claude | openai | none
+    "camera_enabled":     False,       # camera only starts after explicit click
     "show_refinement":    False,       # toggle refinement panel in results step
     "show_buy_links":     False,       # toggle buy-links panel in results step
     "market_result":      None,        # dict from _market_search()
@@ -1228,20 +1229,38 @@ if st.session_state.wizard_step == "identify":
         return {img["hash"] for img in st.session_state.captured_images}
 
     with tab_cam:
-        cam_key   = f"cam_{st.session_state.camera_counter}"
-        cam_photo = st.camera_input("Take a photo of the part", key=cam_key,
-                                    label_visibility="collapsed")
-        if cam_photo is not None:
-            _bytes = cam_photo.getvalue()
-            _hash  = hashlib.md5(_bytes).hexdigest()
-            if _hash not in _known_hashes():
-                st.session_state.captured_images.append({
-                    "bytes": _bytes,
-                    "name":  f"photo_{st.session_state.camera_counter}.jpg",
-                    "mime":  "image/jpeg",
-                    "hash":  _hash,
-                })
-                st.session_state.camera_counter += 1
+        if not st.session_state.camera_enabled:
+            st.markdown(
+                '<div style="border:2px dashed #4a7fa5;border-radius:12px;'
+                'padding:40px 20px;text-align:center;background:#0d1b2a;'
+                'margin:8px 0">'
+                '<div style="font-size:52px;margin-bottom:12px">📷</div>'
+                '<div style="color:#a8dadc;font-size:14px;margin-bottom:16px">'
+                'Camera is off — tap below to start</div>'
+                '</div>',
+                unsafe_allow_html=True,
+            )
+            if st.button("Enable Camera", use_container_width=True, type="primary"):
+                st.session_state.camera_enabled = True
+                st.rerun()
+        else:
+            cam_key   = f"cam_{st.session_state.camera_counter}"
+            cam_photo = st.camera_input("Take a photo of the part", key=cam_key,
+                                        label_visibility="collapsed")
+            if cam_photo is not None:
+                _bytes = cam_photo.getvalue()
+                _hash  = hashlib.md5(_bytes).hexdigest()
+                if _hash not in _known_hashes():
+                    st.session_state.captured_images.append({
+                        "bytes": _bytes,
+                        "name":  f"photo_{st.session_state.camera_counter}.jpg",
+                        "mime":  "image/jpeg",
+                        "hash":  _hash,
+                    })
+                    st.session_state.camera_counter += 1
+                    st.rerun()
+            if st.button("Turn Off Camera", use_container_width=True):
+                st.session_state.camera_enabled = False
                 st.rerun()
 
     with tab_upload:
