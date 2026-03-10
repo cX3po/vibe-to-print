@@ -1184,7 +1184,8 @@ def _appraise_object(
                         {"inline_data": {"mime_type": "image/jpeg", "data": img_b64}},
                         {"text": usr_text},
                     ]}],
-                    "generationConfig": {"maxOutputTokens": 1024},
+                    "generationConfig": {"maxOutputTokens": 1024,
+                                         "responseMimeType": "application/json"},
                 },
                 timeout=40,
             )
@@ -1202,7 +1203,7 @@ def _appraise_object(
     try:
         return json.loads(raw)
     except Exception:
-        m = re.search(r"\{.*\}", raw, re.DOTALL)
+        m = re.search(r"\{[\s\S]*\}", raw)
         if m:
             try:
                 return json.loads(m.group())
@@ -1320,7 +1321,8 @@ def _vision_ai_analyze(
                     {"inline_data": {"mime_type": "image/jpeg", "data": img_b64}},
                     {"text": user_text},
                 ]}],
-                "generationConfig": {"maxOutputTokens": 2048},
+                "generationConfig": {"maxOutputTokens": 2048,
+                                     "responseMimeType": "application/json"},
             }
             _r = requests.post(_url, json=_payload, timeout=40)
             _r.raise_for_status()
@@ -1342,7 +1344,7 @@ def _vision_ai_analyze(
     try:
         return json.loads(raw)
     except Exception:
-        m = re.search(r"\{.*\}", raw, re.DOTALL)
+        m = re.search(r"\{[\s\S]*\}", raw)
         if m:
             try:
                 return json.loads(m.group())
