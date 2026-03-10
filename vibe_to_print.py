@@ -666,6 +666,8 @@ _DEFAULTS: dict = {
     "reanalyse_triggered":  False,       # triggers deep AI re-analysis
     "enhance_diagram_triggered": False,  # triggers AI SVG enhancement
     "enhanced_svg":         "",          # AI-enhanced blueprint SVG
+    "enhanced_diagram_text": "",         # plain-English AI description of the part
+    "enhance_diagram_expanded": False,   # auto-open the details expander after generation
     "nav_confirm_home":     False,       # show "go home?" confirmation on Step 1 back
     "api_key_status":       "",          # "" | "active:{prov}" | "cleared"
     "_api_key_committed":   "",          # last saved/entered key value (for Enter detection)
@@ -1427,6 +1429,69 @@ def _enhance_diagram_with_ai(
     return m.group() if m else ""
 
 
+def _enhance_diagram_text(
+    part_name:        str,
+    part_description: str,
+    template_name:    str,
+    dim_values:       dict,
+    provider:         str,
+    api_key:          str,
+) -> str:
+    """
+    Ask the AI for a plain-English annotated measurement description of
+    the part.  Returns the text response or "" on failure.
+    """
+    dims_text = ", ".join(f"{k}={v}mm" for k, v in dim_values.items()) or "unknown"
+    prompt = (
+        f"Part: {part_name or template_name}\n"
+        f"Description: {part_description or template_name}\n"
+        f"Known dimensions: {dims_text}\n\n"
+        f"Return a detailed, annotated measurement description of this part "
+        f"in plain English. Include:\n"
+        f"- All key dimensions with values and tolerances\n"
+        f"- Recommended print material and why (e.g. PLA, PETG, ABS)\n"
+        f"- How this part connects to or interfaces with the parent device\n"
+        f"- Any critical features (snap fits, threads, D-shaft flat, etc.)\n"
+        f"- Print orientation recommendation\n\n"
+        f"Write clearly for a non-engineer. Use bullet points. "
+        f"Do not output SVG or code."
+    )
+    raw = ""
+    try:
+        if provider == "claude":
+            import anthropic
+            client = anthropic.Anthropic(api_key=api_key)
+            resp   = client.messages.create(
+                model="claude-opus-4-5", max_tokens=1024,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            raw = resp.content[0].text
+        elif provider == "openai":
+            from openai import OpenAI
+            client = OpenAI(api_key=api_key)
+            resp   = client.chat.completions.create(
+                model="gpt-4o", max_tokens=1024,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            raw = resp.choices[0].message.content
+        elif provider == "gemini":
+            _url = (
+                "https://generativelanguage.googleapis.com/v1beta/models/"
+                f"gemini-1.5-flash:generateContent?key={api_key}"
+            )
+            _r = requests.post(
+                _url,
+                json={"contents": [{"parts": [{"text": prompt}]}],
+                      "generationConfig": {"maxOutputTokens": 1024}},
+                timeout=40,
+            )
+            _r.raise_for_status()
+            raw = _r.json()["candidates"][0]["content"]["parts"][0]["text"]
+    except Exception:
+        return ""
+    return (raw or "").strip()
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # MARKET RESEARCH  — Buy vs. Print price comparison
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1725,9 +1790,11 @@ if st.session_state.wizard_step == "identify":
         st.session_state.dim_values              = _result["suggested_dims"]
         st.session_state.show_buy_links          = False
         st.session_state.buy_search_query        = ""
-        st.session_state.reanalyse_triggered     = False
+        st.session_state.reanalyse_triggered       = False
         st.session_state.enhance_diagram_triggered = False
-        st.session_state.enhanced_svg            = ""
+        st.session_state.enhanced_svg              = ""
+        st.session_state.enhanced_diagram_text     = ""
+        st.session_state.enhance_diagram_expanded  = False
         _go("results")
 
     # ── Power-user upgrade panel (hidden by default) ──────────────────────────
@@ -2433,8 +2500,10 @@ if st.session_state.wizard_step == "results":
                 st.session_state.identify_result   = _new_result
                 st.session_state.selected_template = tmpl_get(_new_result["template_id"])
                 st.session_state.dim_values        = _new_result["suggested_dims"]
-                st.session_state.reanalyse_triggered = False
-                st.session_state.enhanced_svg      = ""
+                st.session_state.reanalyse_triggered      = False
+                st.session_state.enhanced_svg             = ""
+                st.session_state.enhanced_diagram_text    = ""
+                st.session_state.enhance_diagram_expanded = False
                 st.rerun()
 
         if st.session_state.get("show_buy_links"):
@@ -2523,12 +2592,20 @@ if st.session_state.wizard_step == "results":
         _ekey  = st.session_state.api_key
         if _eprov not in ("claude", "openai", "gemini") or not _ekey:
             st.warning(
-                "To enhance the diagram, expand **⚙️ AI Settings** above "
-                "and add a Claude, GPT-4o, or free Gemini API key."
+                "To enhance the diagram, open **⚙️ AI Settings** above "
+                "and add a free Gemini key or a Claude / GPT-4o key."
             )
             st.session_state.enhance_diagram_triggered = False
         else:
-            with st.spinner("✨ Generating enhanced blueprint…"):
+            with st.spinner("AI is generating enhanced details…"):
+                _etext = _enhance_diagram_text(
+                    part_name        = res.get("part_name", ""),
+                    part_description = res.get("part_description", "") or res.get("project_description", ""),
+                    template_name    = tmpl["name"],
+                    dim_values       = st.session_state.dim_values,
+                    provider         = _eprov,
+                    api_key          = _ekey,
+                )
                 _esvg = _enhance_diagram_with_ai(
                     part_name        = res.get("part_name", ""),
                     part_description = res.get("part_description", "") or res.get("project_description", ""),
@@ -2537,7 +2614,9 @@ if st.session_state.wizard_step == "results":
                     provider         = _eprov,
                     api_key          = _ekey,
                 )
-            st.session_state.enhanced_svg = _esvg
+            st.session_state.enhanced_diagram_text    = _etext
+            st.session_state.enhanced_svg             = _esvg
+            st.session_state.enhance_diagram_expanded = True
             st.session_state.enhance_diagram_triggered = False
             st.rerun()
 
@@ -2569,9 +2648,20 @@ if st.session_state.wizard_step == "results":
     _enh_col, _ = st.columns([1, 2])
     with _enh_col:
         if st.button("✨ Enhance diagram with AI", use_container_width=True,
-                     help="Generate a more detailed annotated blueprint using AI"):
+                     help="Get a detailed AI description of dimensions, materials, and fit"):
             st.session_state.enhance_diagram_triggered = True
             st.rerun()
+
+    # AI-enhanced details expander — opens automatically after generation
+    _etext = st.session_state.get("enhanced_diagram_text", "")
+    if _etext:
+        with st.expander(
+            "✨ AI-Enhanced Diagram Details",
+            expanded=st.session_state.get("enhance_diagram_expanded", False),
+        ):
+            st.markdown(_etext)
+            # After first view collapse by default on subsequent reruns
+            st.session_state.enhance_diagram_expanded = False
 
     # ── Confirmation buttons ──────────────────────────────────────────────────
     st.markdown("**Does this look right?**")
