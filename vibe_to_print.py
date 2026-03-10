@@ -608,6 +608,18 @@ div[data-testid="stButton"].start-over-btn > button {
     color: #7a9ab8 !important;
     width: auto !important;
 }
+/* Pointer cursor on expander headers */
+div[data-testid="stExpander"] summary {
+    cursor: pointer !important;
+}
+/* Pointer cursor on selectbox/dropdown */
+div[data-testid="stSelectbox"] > div {
+    cursor: pointer !important;
+}
+/* Pointer cursor on all Streamlit buttons */
+button[kind="secondary"], button[kind="primary"] {
+    cursor: pointer !important;
+}
 </style>
 """, unsafe_allow_html=True)
 
