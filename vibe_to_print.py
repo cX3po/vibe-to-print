@@ -1327,6 +1327,7 @@ if st.session_state.wizard_step == "identify":
             cam_key   = f"cam_{st.session_state.camera_counter}"
             cam_photo = st.camera_input("Take a photo of the part", key=cam_key,
                                         label_visibility="collapsed")
+            st.caption("💡 Tip: Centre the part in the frame with good lighting for best results.")
             if cam_photo is not None:
                 _bytes = cam_photo.getvalue()
                 _hash  = hashlib.md5(_bytes).hexdigest()
