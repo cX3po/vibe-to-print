@@ -1174,7 +1174,7 @@ def _appraise_object(
         elif provider == "gemini":
             _url = (
                 "https://generativelanguage.googleapis.com/v1beta/models/"
-                f"gemini-1.5-flash:generateContent?key={api_key}"
+                f"gemini-2.5-flash:generateContent?key={api_key}"
             )
             _r = requests.post(
                 _url,
@@ -1312,7 +1312,7 @@ def _vision_ai_analyze(
         try:
             _url = (
                 "https://generativelanguage.googleapis.com/v1beta/models/"
-                f"gemini-1.5-flash:generateContent?key={api_key}"
+                f"gemini-2.5-flash:generateContent?key={api_key}"
             )
             _payload = {
                 "system_instruction": {"parts": [{"text": _VISION_SYSTEM_PROMPT}]},
@@ -1593,7 +1593,7 @@ def _generate_photo_instructions(
         elif provider == "gemini":
             _url = (
                 "https://generativelanguage.googleapis.com/v1beta/models/"
-                f"gemini-1.5-flash:generateContent?key={api_key}"
+                f"gemini-2.5-flash:generateContent?key={api_key}"
             )
             _r = requests.post(
                 _url,
@@ -1668,7 +1668,7 @@ def _enhance_diagram_text(
         elif provider == "gemini":
             _url = (
                 "https://generativelanguage.googleapis.com/v1beta/models/"
-                f"gemini-1.5-flash:generateContent?key={api_key}"
+                f"gemini-2.5-flash:generateContent?key={api_key}"
             )
             _r = requests.post(
                 _url,
