@@ -752,10 +752,9 @@ if st.session_state.wizard_step == "welcome":
             _go("identify")
 
     # ── How it works ──────────────────────────────────────────────────────────
-    st.markdown("""
-<div style="margin-top:2.5rem;text-align:center">
-  <div style="color:#4a7fa5;font-size:0.75rem;letter-spacing:.1em;
-              text-transform:uppercase;margin-bottom:1rem">How it works</div>
+    with st.expander("▶ How it works — click to see"):
+        st.markdown("""
+<div style="margin-top:1rem;text-align:center">
   <div style="display:flex;justify-content:center;align-items:flex-start;
               gap:0;flex-wrap:wrap">
 
