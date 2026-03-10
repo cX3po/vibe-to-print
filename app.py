@@ -971,10 +971,21 @@ Available template IDs (choose the closest match):
   box_open, box_with_lid, end_cap, l_bracket,
   cable_clip, wall_hook, spacer, drawer_pull, button_cap
 
+Part Description: Write 2-3 plain-English sentences describing exactly what this part \
+is and what it does functionally (e.g. "A D-shaft rotary knob used to control a \
+potentiometer or selector switch. The flat side of the shaft ensures the knob locks \
+in position without slipping.").
+
+Device Context: Describe the likely appliance or device this part comes from, in one \
+sentence (e.g. "This part is commonly found on kitchen appliances, audio equipment, \
+or HVAC controls.").
+
 Constraint: Output ONLY a valid JSON object — no markdown, no prose, nothing else.
 JSON structure:
 {
   "visual_description": "...",
+  "part_description": "2-3 sentences describing what the part is and does",
+  "device_context": "one sentence describing the likely device/appliance",
   "part_name": "...",
   "part_model": "...",
   "category": "...",
@@ -1120,6 +1131,8 @@ def analyze_input(
                 "part_model":          vision.get("part_model", ""),
                 "search_terms":        vision.get("search_terms", []),
                 "ai_svg":              vision.get("svg_code", ""),
+                "part_description":    vision.get("part_description", ""),
+                "device_description":  vision.get("device_context", ""),
             }
         elif vision and "_error" in vision:
             warning = "Deep analysis unavailable right now — using standard identification instead."
@@ -1203,7 +1216,57 @@ def analyze_input(
         "part_model":          "",
         "search_terms":        [],
         "ai_svg":              "",
+        "part_description":    "",
+        "device_description":  "",
     }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PART IMAGE SEARCH  — fetch thumbnail URLs via DDG Instant Answers
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _fetch_part_images(part_name: str, max_images: int = 3) -> list[str]:
+    """
+    Try to retrieve image URLs for a part using the DuckDuckGo Instant Answer
+    API (no key required).  Returns a list of up to max_images URLs.
+    Fails silently and returns [] on any error.
+    """
+    if not part_name:
+        return []
+    try:
+        r = requests.get(
+            "https://api.duckduckgo.com/",
+            params={
+                "q":             part_name,
+                "format":        "json",
+                "no_html":       "1",
+                "skip_disambig": "1",
+            },
+            timeout=6,
+        )
+        r.raise_for_status()
+        data = r.json()
+
+        urls: list[str] = []
+
+        # Primary image from the Instant Answer
+        primary = data.get("Image") or data.get("Thumbnail") or ""
+        if primary and primary.startswith("http"):
+            urls.append(primary)
+
+        # Related-topic images
+        for topic in data.get("RelatedTopics", []):
+            if isinstance(topic, dict):
+                icon = topic.get("Icon", {})
+                url  = (icon.get("URL") or "").strip()
+                if url and url.startswith("http") and url not in urls:
+                    urls.append(url)
+            if len(urls) >= max_images:
+                break
+
+        return urls[:max_images]
+    except Exception:
+        return []
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1994,6 +2057,11 @@ if st.session_state.wizard_step == "results":
         elif res.get("caption"):
             st.markdown(f"**Photo:** {res['caption']}")
 
+        # Part description (2-3 sentences about what it is and does)
+        part_desc = res.get("part_description", "")
+        if part_desc:
+            st.markdown(part_desc)
+
         desc = res.get("project_description") or tmpl["description"]
         st.markdown(f"**Plan:** {desc}")
         st.markdown(f"**Template:** {tmpl['name']}")
@@ -2035,6 +2103,33 @@ if st.session_state.wizard_step == "results":
             f'</div>',
             unsafe_allow_html=True,
         )
+
+    # ── About this device ─────────────────────────────────────────────────────
+    device_desc = res.get("device_description", "")
+    if device_desc:
+        st.markdown(
+            f'<div style="background:#1a2a3a;border-left:3px solid #4a7fa5;'
+            f'border-radius:0 8px 8px 0;padding:10px 14px;margin:8px 0 4px 0;'
+            f'font-size:0.88rem;color:#b0c4d8">'
+            f'<span style="font-weight:700;color:#7eb8d4">About this device</span>'
+            f'<br>{device_desc}</div>',
+            unsafe_allow_html=True,
+        )
+
+    # ── Reference images ──────────────────────────────────────────────────────
+    _img_query = res.get("part_name") or res.get("template_name") or ""
+    if _img_query:
+        _img_urls = _fetch_part_images(_img_query)
+        if _img_urls:
+            st.caption("📷 Reference images")
+            _img_cols = st.columns(len(_img_urls))
+            for _col, _url in zip(_img_cols, _img_urls):
+                try:
+                    _r = requests.get(_url, timeout=5)
+                    if _r.ok and _r.headers.get("content-type", "").startswith("image"):
+                        _col.image(_r.content, width=150)
+                except Exception:
+                    pass
 
     st.markdown("---")
 
