@@ -686,8 +686,12 @@ _DEFAULTS: dict = {
     "enhance_diagram_expanded": False,   # auto-open the details expander after generation
     "appraisal_result":     None,        # dict from _appraise_object()
     "appraisal_image_url":  "",          # reference image URL from DDG
-    "appraisal_correction": "",          # user correction to the appraisal
-    "repair_intent":        "",          # what the user wants to fix/replace
+    "appraisal_correction":  "",          # user correction to the appraisal
+    "repair_intent":         "",          # what the user wants to fix/replace
+    "repair_strategy_text":  "",          # AI-generated close-up photo instructions
+    "closeup_bytes":         None,        # close-up measurement photo bytes
+    "closeup_mime":          "image/jpeg",
+    "closeup_analyzed":      False,       # True once close-up has been run through analyze_input
     "nav_confirm_home":     False,       # show "go home?" confirmation on Step 1 back
     "api_key_status":       "",          # "" | "active:{prov}" | "cleared"
     "_api_key_committed":   "",          # last saved/entered key value (for Enter detection)
@@ -1528,6 +1532,86 @@ def _fetch_part_images(part_name: str, max_images: int = 3) -> list[str]:
         return urls[:max_images]
     except Exception:
         return []
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PHOTO INSTRUCTION GENERATOR  — tells user exactly how to photograph the part
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _generate_photo_instructions(
+    object_name:   str,
+    repair_intent: str,
+    correction:    str,
+    provider:      str,
+    api_key:       str,
+) -> str:
+    """
+    Generate 1-2 specific, actionable sentences telling the user how to
+    photograph the broken/missing part for accurate 3D measurement.
+    Falls back to a sensible generic instruction if AI is unavailable.
+    """
+    if not repair_intent:
+        return ""
+
+    item = object_name
+    if correction:
+        item = f"{object_name} ({correction})"
+
+    prompt = (
+        f"Item: {item}\n"
+        f"Repair goal: {repair_intent}\n\n"
+        f"Write exactly 1-2 sentences of specific, actionable instructions "
+        f"telling the user how to photograph the broken or missing part for "
+        f"accurate 3D measurement. Specify: (1) the exact part to focus on, "
+        f"(2) the best camera angle (straight-on, side-on, etc.), and "
+        f"(3) that they must place a coin or credit card right next to the "
+        f"part for scale. Refer to the specific part by name. "
+        f"Output ONLY the instructions — no preamble, no bullet points."
+    )
+
+    try:
+        if provider == "claude":
+            import anthropic
+            client = anthropic.Anthropic(api_key=api_key)
+            resp   = client.messages.create(
+                model="claude-opus-4-5", max_tokens=120,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return resp.content[0].text.strip()
+
+        elif provider == "openai":
+            from openai import OpenAI
+            client = OpenAI(api_key=api_key)
+            resp   = client.chat.completions.create(
+                model="gpt-4o", max_tokens=120,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return resp.choices[0].message.content.strip()
+
+        elif provider == "gemini":
+            _url = (
+                "https://generativelanguage.googleapis.com/v1beta/models/"
+                f"gemini-1.5-flash:generateContent?key={api_key}"
+            )
+            _r = requests.post(
+                _url,
+                json={
+                    "contents": [{"parts": [{"text": prompt}]}],
+                    "generationConfig": {"maxOutputTokens": 120},
+                },
+                timeout=20,
+            )
+            _r.raise_for_status()
+            return _r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+
+    except Exception:
+        pass
+
+    # Generic fallback
+    return (
+        f"To measure the part accurately, please take a close-up photo "
+        f"straight-on with a coin or credit card placed right next to it for scale."
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2585,19 +2669,132 @@ if st.session_state.wizard_step == "results":
                      key="_create_strategy_btn"):
             st.session_state.appraisal_correction = _correction.strip()
             st.session_state.repair_intent        = _repair.strip()
+            st.session_state.closeup_bytes        = None   # reset for fresh close-up
+            st.session_state.closeup_analyzed     = False
+
+            # Generate AI photo instructions (text only, no vision required)
+            _strat_prov = st.session_state.ai_provider
+            _strat_key  = st.session_state.api_key
+            if _strat_prov in ("claude", "openai", "gemini") and _strat_key:
+                with st.spinner("🤖 Generating photo instructions…"):
+                    _instr = _generate_photo_instructions(
+                        object_name   = _apr.get("object_name", ""),
+                        repair_intent = _repair.strip(),
+                        correction    = _correction.strip(),
+                        provider      = _strat_prov,
+                        api_key       = _strat_key,
+                    )
+                st.session_state.repair_strategy_text = _instr
+            else:
+                st.session_state.repair_strategy_text = ""
             st.rerun()
 
-        # Show a confirmation badge once the user has submitted their intent
+        # ── Photo instruction + close-up capture (shown after strategy created) ──
         if st.session_state.get("repair_intent"):
             st.success(
-                f"✅ **Repair goal saved:** {st.session_state.repair_intent}"
+                f"✅ **Repair goal:** {st.session_state.repair_intent}"
             )
             if st.session_state.get("appraisal_correction"):
                 st.caption(
-                    f"📝 Your correction: {st.session_state.appraisal_correction}"
+                    f"📝 Your note: {st.session_state.appraisal_correction}"
                 )
 
+            # Photo instruction callout
+            _strategy = st.session_state.get("repair_strategy_text", "")
+            _instr_text = _strategy or (
+                "Take a close-up photo straight-on of the specific part you need "
+                "to replace, with a coin or credit card next to it for scale."
+            )
+            st.markdown(
+                f'<div style="background:#fff8e1;border:1px solid #ffe082;'
+                f'border-left:4px solid #f9a825;border-radius:0 8px 8px 0;'
+                f'padding:14px 16px;margin:12px 0;font-size:14px;color:#4e342e;'
+                f'line-height:1.6">'
+                f'<strong>📸 How to take your measurement photo:</strong><br>{_instr_text}'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+
+            # Close-up camera / upload tabs
+            _cu_cam_tab, _cu_upload_tab = st.tabs(
+                ["📷 Take close-up photo", "🖼️ Upload close-up photo"]
+            )
+            with _cu_cam_tab:
+                _cu_cam_photo = st.camera_input(
+                    "Close-up measurement photo",
+                    key="closeup_cam_input",
+                    label_visibility="collapsed",
+                )
+                if _cu_cam_photo is not None:
+                    st.session_state.closeup_bytes    = _cu_cam_photo.getvalue()
+                    st.session_state.closeup_mime     = "image/jpeg"
+                    st.session_state.closeup_analyzed = False
+                    st.rerun()
+
+            with _cu_upload_tab:
+                _cu_file = st.file_uploader(
+                    "Upload close-up",
+                    type=["jpg", "jpeg", "png", "webp"],
+                    key="closeup_upload_input",
+                    label_visibility="collapsed",
+                )
+                if _cu_file is not None:
+                    st.session_state.closeup_bytes    = _cu_file.read()
+                    st.session_state.closeup_mime     = _cu_file.type or "image/jpeg"
+                    st.session_state.closeup_analyzed = False
+                    st.rerun()
+
+            # Thumbnail + analyse button once a close-up is ready
+            if st.session_state.get("closeup_bytes"):
+                _cu_thumb_col, _cu_btn_col = st.columns([1, 2])
+                with _cu_thumb_col:
+                    st.image(
+                        st.session_state.closeup_bytes,
+                        caption="Close-up photo",
+                        use_container_width=True,
+                    )
+                with _cu_btn_col:
+                    st.markdown("**Close-up ready!**")
+                    st.caption(
+                        "Click below to analyse this photo for precise measurements."
+                    )
+                    if st.button(
+                        "📐 Analyse for measurements",
+                        type="primary",
+                        use_container_width=True,
+                        key="_analyse_closeup_btn",
+                    ):
+                        _cu_desc = (
+                            st.session_state.repair_intent
+                            or st.session_state.vibe_description
+                        )
+                        with st.spinner(
+                            "📐 Analysing close-up for precise measurements…"
+                        ):
+                            _cu_result = analyze_input(
+                                image_bytes = st.session_state.closeup_bytes,
+                                description = _cu_desc,
+                                hf_token    = st.session_state.api_key,
+                                ai_provider = st.session_state.ai_provider,
+                            )
+                        st.session_state.identify_result   = _cu_result
+                        st.session_state.selected_template = tmpl_get(
+                            _cu_result["template_id"]
+                        )
+                        st.session_state.dim_values        = _cu_result["suggested_dims"]
+                        st.session_state.closeup_analyzed  = True
+                        st.rerun()
+
         st.markdown("---")
+
+    # ── Guard: wait for close-up if the AI generated photo instructions ──────
+    # Only block when repair_strategy_text is non-empty (AI gave instructions).
+    # If no AI key, repair_strategy_text stays "" → skip guard, show results.
+    _strategy_active = bool(st.session_state.get("repair_strategy_text"))
+    _closeup_ready   = bool(st.session_state.get("closeup_analyzed"))
+
+    if _strategy_active and not _closeup_ready:
+        st.stop()
 
     # ── Submitted photos ──────────────────────────────────────────────────────
     _submitted = st.session_state.captured_images
