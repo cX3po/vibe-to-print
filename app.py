@@ -657,8 +657,8 @@ button[kind="secondary"], button[kind="primary"] {
     cursor: pointer !important;
 }
 /* Version tag */
-.vtp-version { position: fixed; bottom: 4px; right: 8px; font-size: 10px;
-    color: #666; opacity: 0.6; z-index: 9999; pointer-events: none; }
+.vtp-version { position: fixed; top: 6px; left: 12px; font-size: 11px;
+    color: #888; opacity: 0.8; z-index: 9999; pointer-events: none; }
 </style>
 """, unsafe_allow_html=True)
 st.markdown(f'<div class="vtp-version">v{_APP_VERSION}</div>', unsafe_allow_html=True)
