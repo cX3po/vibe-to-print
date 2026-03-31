@@ -573,8 +573,10 @@ def tmpl_generate_scad(template: dict, dim_values: dict[str, str],
 # PAGE CONFIG & CSS
 # ══════════════════════════════════════════════════════════════════════════════
 
+_APP_VERSION = (Path(__file__).parent / "VERSION").read_text().strip() if (Path(__file__).parent / "VERSION").exists() else "dev"
+
 st.set_page_config(
-    page_title="Vibe-to-Print",
+    page_title=f"Vibe-to-Print v{_APP_VERSION}",
     page_icon="🖨️",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -654,8 +656,12 @@ div[data-testid="stSelectbox"] > div {
 button[kind="secondary"], button[kind="primary"] {
     cursor: pointer !important;
 }
+/* Version tag */
+.vtp-version { position: fixed; bottom: 4px; right: 8px; font-size: 10px;
+    color: #666; opacity: 0.6; z-index: 9999; pointer-events: none; }
 </style>
 """, unsafe_allow_html=True)
+st.markdown(f'<div class="vtp-version">v{_APP_VERSION}</div>', unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SESSION STATE DEFAULTS
@@ -675,7 +681,9 @@ _DEFAULTS: dict = {
     "dim_values":         {},          # {dim_id: str}
     "scad_code":          "",
     "api_key":            "",          # HF / Claude / OpenAI token
-    "ai_provider":        "hf",        # hf (default) | claude | openai | none
+    "ai_provider":        "hf",        # hf (default) | haiku_free | claude | openai | gemini
+    "premium_scans_used": 0,           # counter for free premium (Haiku) scans
+    "premium_scan_limit": 10,          # max free premium scans
     "camera_enabled":     False,       # camera only starts after explicit click
     "show_refinement":      False,       # toggle refinement panel in results step
     "show_buy_links":       False,       # toggle buy-links panel in results step
@@ -907,10 +915,49 @@ Download the design file to 3D print the part yourself, or use the search links 
 # AI ANALYSIS ENGINE  (embedded — no external module imports)
 # ══════════════════════════════════════════════════════════════════════════════
 
+# ── Premium scans via Identifier Engine (Haiku Vision) ───────────────────────
+import os as _os
+
+_PREMIUM_API_KEY = _os.environ.get("PREMIUM_API_KEY", "")  # Phil's Haiku key for free tier
+
+def _premium_scan_available() -> bool:
+    """Check if user has free premium scans remaining."""
+    if not _PREMIUM_API_KEY:
+        return False
+    return st.session_state.premium_scans_used < st.session_state.premium_scan_limit
+
+def _premium_scans_remaining() -> int:
+    return max(0, st.session_state.premium_scan_limit - st.session_state.premium_scans_used)
+
+def _use_premium_scan(image_bytes: bytes, description: str = "") -> dict | None:
+    """Use one free premium scan via the Identifier Engine."""
+    if not _premium_scan_available():
+        return None
+    try:
+        from engine import VisionEngine
+        from prompts import PRINT_IDENTIFIER
+        engine = VisionEngine(provider="haiku", api_key=_PREMIUM_API_KEY)
+        results = engine.analyze(image_bytes, PRINT_IDENTIFIER)
+        if results:
+            st.session_state.premium_scans_used += 1
+            r = results[0]
+            return {
+                "part_name": r.get("object_name", ""),
+                "object_type": r.get("object_type", ""),
+                "material": r.get("material", ""),
+                "print_material": r.get("suggested_print_material", ""),
+                "dimensions": r.get("estimated_dimensions_mm", {}),
+                "print_difficulty": r.get("print_difficulty", ""),
+                "description": r.get("description", ""),
+                "search_query": r.get("search_query", ""),
+            }
+    except Exception:
+        pass
+    return None
+
 # ── Hugging Face model config ─────────────────────────────────────────────────
 # Token is read from Streamlit Cloud secrets (Settings → Secrets → HF_TOKEN).
 # For local dev, set the environment variable: export HF_TOKEN=hf_...
-import os as _os
 _HF_TOKEN_DEFAULT = _os.environ.get("HF_TOKEN", "")
 
 _BLIP_URL     = "https://api-inference.huggingface.co/models/Salesforce/blip-image-captioning-large"
@@ -1372,6 +1419,34 @@ def analyze_input(
     caption = ""
     warning = ""
     method  = "keyword"
+
+    # ── Path P: Premium free scan (Haiku via Identifier Engine) ──────────────
+    if ai_provider == "haiku_free" and image_bytes and _premium_scan_available():
+        premium = _use_premium_scan(image_bytes, description)
+        if premium:
+            # Map premium result to template
+            search_str = f"{premium.get('object_type', '')} {premium.get('part_name', '')}"
+            matches = tmpl_search(search_str)
+            tmpl = matches[0] if matches else INTERNAL_TEMPLATES[0]
+            dims = _default_dims(tmpl)
+            for did, val in (premium.get("dimensions") or {}).items():
+                if did in dims:
+                    dims[did] = str(val)
+            return {
+                "caption":             premium.get("description", ""),
+                "project_description": premium.get("description", ""),
+                "template_id":         tmpl["id"],
+                "template_name":       tmpl["name"],
+                "object_type":         tmpl["category"],
+                "suggested_dims":      dims,
+                "method":              "premium_haiku",
+                "warning":             f"Premium scan ({_premium_scans_remaining()} remaining)",
+                "part_name":           premium.get("part_name", ""),
+                "part_model":          "",
+                "search_terms":        [premium.get("search_query", "")],
+                "part_description":    premium.get("description", ""),
+                "device_description":  premium.get("material", ""),
+            }
 
     # ── Path A: Vision AI (Claude / OpenAI / Gemini) — richest result ─────────
     if ai_provider in ("claude", "openai", "gemini") and image_bytes and hf_token:
@@ -2029,16 +2104,30 @@ if st.session_state.wizard_step == "identify":
         elif _ks == "cleared":
             st.info("AI key removed — using default Hugging Face analysis.")
 
-        st.caption("AI analysis works automatically out of the box. "
-                   "Add a Claude, GPT-4o, or Gemini key for deeper, more detailed part identification.")
+        _remaining = _premium_scans_remaining()
+        if _PREMIUM_API_KEY and _remaining > 0:
+            st.caption(f"🎁 **{_remaining} free premium scans remaining** — "
+                       "powered by Claude AI for detailed part identification. "
+                       "Or add your own API key for unlimited scans.")
+        else:
+            st.caption("AI analysis works automatically out of the box. "
+                       "Add a Claude, GPT-4o, or Gemini key for deeper, more detailed part identification.")
 
         _providers = [
-            "hf — Hugging Face (active)",
+            "hf — Hugging Face (free, basic)",
+        ]
+        _pkeys = ["hf"]
+
+        if _PREMIUM_API_KEY and _remaining > 0:
+            _providers.insert(0, f"haiku_free — Premium AI ✨ ({_remaining} free)")
+            _pkeys.insert(0, "haiku_free")
+
+        _providers.extend([
             "claude — Anthropic Claude ✨",
             "openai — GPT-4o ✨",
-            "gemini — Google Gemini ✨ (Free)",
-        ]
-        _pkeys = ["hf", "claude", "openai", "gemini"]
+            "gemini — Google Gemini ✨",
+        ])
+        _pkeys.extend(["claude", "openai", "gemini"])
         _cur   = st.session_state.ai_provider
         _idx   = _pkeys.index(_cur) if _cur in _pkeys else 0
         _provider = st.selectbox("AI brain", _providers, index=_idx,
@@ -2063,7 +2152,10 @@ if st.session_state.wizard_step == "identify":
                 except Exception:
                     pass
 
-        if _prov in ("claude", "openai", "gemini"):
+        if _prov == "haiku_free":
+            st.info(f"🎁 Premium AI active — {_premium_scans_remaining()} free scans remaining. "
+                    "No API key needed.")
+        elif _prov in ("claude", "openai", "gemini"):
             _labels       = {"claude": "Anthropic API key",
                              "openai": "OpenAI API key",
                              "gemini": "Google API key"}
