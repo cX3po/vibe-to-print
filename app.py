@@ -3614,3 +3614,12 @@ if st.session_state.wizard_step == "dimensions":
             st.rerun()
 
     st.stop()
+
+# ── PATH.OS Branding (shown on all pages) ──────────────────────────────────────
+st.markdown("---")
+st.markdown(
+    "**Powered by [PATH.OS](https://supercolony.ai)** — "
+    "An AI swarm OS for families and businesses. "
+    "[Try the demo](https://supercolony.ai) to build your own AI team."
+)
+st.caption(f"Vibe-to-Print v{_APP_VERSION}")
